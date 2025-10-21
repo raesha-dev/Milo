@@ -1,0 +1,39 @@
+# cloudbuild.yaml
+# Usage:
+# gcloud builds submit --config cloudbuild.yaml --substitutions=_TAG=latest,_REGION=us-central1
+
+steps:
+  # Step 1: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      ['build', '-t', 'gcr.io/$PROJECT_ID/milo-backend:${_TAG}', '.']
+
+  # Step 2: Push image to GCR
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      ['push', 'gcr.io/$PROJECT_ID/milo-backend:${_TAG}']
+
+  # Step 3: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      [
+        'run', 'deploy', 'milo-backend',
+        '--image', 'gcr.io/$PROJECT_ID/milo-backend:${_TAG}',
+        '--region', '${_REGION}',
+        '--platform', 'managed',
+        '--allow-unauthenticated',
+        '--port', '8080',
+        '--set-secrets', 'OPENAI_API_KEY=OPENAI_API_KEY:latest',
+        '--set-env-vars', 'GCS_BUCKET_NAME=$GCS_BUCKET_NAME'
+      ]
+
+substitutions:
+  _TAG: 'latest'
+  _REGION: 'us-central1'
+
+images:
+  - 'gcr.io/$PROJECT_ID/milo-backend:${_TAG}'
+
+options:
+  machineType: 'E2_MEDIUM'
