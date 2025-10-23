@@ -160,7 +160,7 @@ export async function getMiloResponse(userMessage: string, context?: {
   currentStreak?: number;
 }): Promise<MiloResponse> {
   // TODO: Implement OpenAI GPT integration
-  // const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // const openai = new OpenAI({ apiKey: import.meta.env.OPENAI_API_KEY });
   // const completion = await openai.chat.completions.create({
   //   model: "gpt-4o-mini",
   //   messages: [
@@ -212,7 +212,7 @@ export function sanitizeUserInput(input: string): string {
 }
 
 export function checkConsent(): boolean {
-  // Check if user has given consent for data processing
+  // Check if user has given consent for data import.metaing
   return localStorage.getItem('milo_consent') === 'true';
 }
 
@@ -227,31 +227,31 @@ export function recordConsent(): void {
 
 export const GOOGLE_CLOUD_CONFIG = {
   // Add your Google Cloud project configuration here
-  projectId: process.env.REACT_APP_GOOGLE_CLOUD_PROJECT_ID || '',
-  region: process.env.REACT_APP_GOOGLE_CLOUD_REGION || 'us-central1',
+  projectId: import.meta.env.REACT_APP_GOOGLE_CLOUD_PROJECT_ID || '',
+  region: import.meta.env.REACT_APP_GOOGLE_CLOUD_REGION || 'us-central1',
   
   // NLP API settings
   nlp: {
-    enabled: process.env.REACT_APP_ENABLE_NLP === 'true',
-    endpoint: process.env.REACT_APP_NLP_ENDPOINT || ''
+    enabled: import.meta.env.REACT_APP_ENABLE_NLP === 'true',
+    endpoint: import.meta.env.REACT_APP_NLP_ENDPOINT || ''
   },
   
   // Firestore settings
   firestore: {
-    enabled: process.env.REACT_APP_ENABLE_FIRESTORE === 'true',
-    database: process.env.REACT_APP_FIRESTORE_DATABASE || '(default)'
+    enabled: import.meta.env.REACT_APP_ENABLE_FIRESTORE === 'true',
+    database: import.meta.env.REACT_APP_FIRESTORE_DATABASE || '(default)'
   },
   
   // TTS settings
   tts: {
-    enabled: process.env.REACT_APP_ENABLE_TTS === 'true',
+    enabled: import.meta.env.REACT_APP_ENABLE_TTS === 'true',
     defaultVoice: 'en-US-Journey-F',
     speakingRate: 1.0
   }
 };
 
 export const OPENAI_CONFIG = {
-  enabled: process.env.REACT_APP_ENABLE_OPENAI === 'true',
+  enabled: import.meta.env.REACT_APP_ENABLE_OPENAI === 'true',
   model: 'gpt-4o-mini',
   maxTokens: 150,
   temperature: 0.7

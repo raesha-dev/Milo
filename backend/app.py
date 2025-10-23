@@ -187,6 +187,36 @@ def get_moods():
     except Exception as e:
         logging.exception("Fetching moods failed: %s", e)
         return jsonify({"error": str(e)}), 500
+    
+# Optional: Safe backend endpoint mirroring frontend's analyzeLatestMood
+@app.route("/api/analyze_latest_mood", methods=["POST"])
+def analyze_latest_mood():
+    """Analyze mood text and return sentiment data safely."""
+
+    data = request.get_json()
+    mood_text = data.get("moodText")
+    
+
+    if not mood_text:
+        return jsonify({"error": "Missing moodText"}), 400
+
+    try:
+        ensure_google_clients()
+        document = language_v1.Document(content=mood_text, type_=language_v1.Document.Type.PLAIN_TEXT)
+        sentiment_result = language_client.analyze_sentiment(request={"document": document}).document_sentiment
+
+        logging.info(
+            f"Mood sentiment analyzed: score={sentiment_result.score}, magnitude={sentiment_result.magnitude}"
+        )
+
+        return jsonify({
+            "score": sentiment_result.score,
+            "magnitude": sentiment_result.magnitude,
+            "status": "success"
+        })
+    except Exception as e:
+        logging.exception("Error analyzing mood sentiment")
+        return jsonify({"error": str(e)}), 500
 
 # --- Run app ---
 if __name__ == "__main__":

@@ -151,3 +151,211 @@ All colors MUST be HSL.
     @apply bg-background text-foreground;
   }
 }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Light Violet Discord/Instagram Theme */
+    --background: 270 30% 98%;
+    --foreground: 270 15% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 270 15% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 270 15% 15%;
+
+    --primary: 270 60% 65%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 270 40% 95%;
+    --secondary-foreground: 270 15% 15%;
+
+    --muted: 270 30% 94%;
+    --muted-foreground: 270 10% 45%;
+
+    --accent: 260 50% 70%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 270 20% 90%;
+    --input: 270 20% 94%;
+    --ring: 270 60% 65%;
+
+    --radius: 0.75rem;
+    
+    /* Discord-inspired colors */
+    --discord-bg: 270 25% 96%;
+    --discord-sidebar: 270 30% 20%;
+    --discord-sidebar-hover: 270 30% 25%;
+    --discord-channel: 270 25% 94%;
+    --discord-active: 270 60% 65%;
+    
+    /* Instagram-inspired gradients */
+    --gradient-story: linear-gradient(135deg, hsl(320 75% 70%), hsl(270 65% 75%), hsl(220 70% 75%));
+    --gradient-violet: linear-gradient(135deg, hsl(270 60% 75%), hsl(260 55% 80%));
+    --gradient-soft: linear-gradient(135deg, hsl(270 40% 95%), hsl(260 35% 97%));
+    
+    --sidebar-background: 270 30% 20%;
+    --sidebar-foreground: 270 10% 85%;
+    --sidebar-primary: 270 60% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 270 30% 25%;
+    --sidebar-accent-foreground: 270 10% 90%;
+    --sidebar-border: 270 20% 30%;
+    --sidebar-ring: 270 60% 65%;
+    
+    /* Member online status */
+    --online: 142 76% 36%;
+    --idle: 38 92% 50%;
+    --offline: 214 10% 60%;
+  }
+
+  /* Background Theme Variants */
+  .theme-violet {
+    --discord-bg: 270 25% 96%;
+    --discord-channel: 270 25% 94%;
+  }
+
+  .theme-rose {
+    --discord-bg: 340 30% 96%;
+    --discord-channel: 340 25% 94%;
+  }
+
+  .theme-mint {
+    --discord-bg: 160 30% 96%;
+    --discord-channel: 160 25% 94%;
+  }
+
+  .theme-peach {
+    --discord-bg: 25 35% 96%;
+    --discord-channel: 25 30% 94%;
+  }
+
+  .theme-sky {
+    --discord-bg: 200 30% 96%;
+    --discord-channel: 200 25% 94%;
+  }
+
+  .theme-lavender {
+    --discord-bg: 280 30% 96%;
+    --discord-channel: 280 25% 94%;
+  }
+
+  .theme-sage {
+    --discord-bg: 120 20% 96%;
+    --discord-channel: 120 15% 94%;
+  }
+
+  .theme-pearl {
+    --discord-bg: 0 0% 97%;
+    --discord-channel: 0 0% 95%;
+  }
+
+  .dark {
+    --background: 270 30% 12%;
+    --foreground: 270 10% 90%;
+
+    --card: 270 25% 15%;
+    --card-foreground: 270 10% 90%;
+
+    --popover: 270 25% 15%;
+    --popover-foreground: 270 10% 90%;
+
+    --primary: 270 60% 65%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 270 20% 20%;
+    --secondary-foreground: 270 10% 90%;
+
+    --muted: 270 20% 20%;
+    --muted-foreground: 270 10% 60%;
+
+    --accent: 260 50% 70%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62.8% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 270 20% 22%;
+    --input: 270 20% 20%;
+    --ring: 270 60% 65%;
+    
+    --discord-bg: 270 25% 14%;
+    --discord-sidebar: 270 30% 10%;
+    --discord-sidebar-hover: 270 30% 15%;
+    --discord-channel: 270 25% 18%;
+    --discord-active: 270 60% 65%;
+    
+    --sidebar-background: 270 30% 10%;
+    --sidebar-foreground: 270 10% 85%;
+    --sidebar-primary: 270 60% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 270 30% 15%;
+    --sidebar-accent-foreground: 270 10% 90%;
+    --sidebar-border: 270 20% 15%;
+    --sidebar-ring: 270 60% 65%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+  
+  /* Story ring animation */
+  @keyframes story-pulse {
+    0%, 100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.8;
+      transform: scale(1.05);
+    }
+  }
+  
+  .story-ring {
+    animation: story-pulse 2s ease-in-out infinite;
+  }
+  
+  /* Smooth hover effects */
+  .hover-lift {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px hsl(var(--primary) / 0.15);
+  }
+  
+  /* Discord-style scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--discord-bg));
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted));
+    border-radius: 4px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+}

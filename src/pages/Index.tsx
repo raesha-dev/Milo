@@ -28,7 +28,11 @@ const Index = () => {
     <div className="w-full h-screen">
       <MiloApp isDarkMode={isDarkMode} onToggleTheme={toggleTheme} />
     </div>
+    
   );
 };
+
+
+
 
 export default Index;
