@@ -155,9 +155,10 @@ export const MiloApp: React.FC<MiloAppProps> = ({ isDarkMode, onToggleTheme }) =
       </nav>
 
       {/* Main Content Render */}
-      <main className="flex-1 overflow-hidden">
+      <main className="flex-1 overflow-auto">
         {renderCurrentView()}
       </main>
     </div>
+    
   );
 };

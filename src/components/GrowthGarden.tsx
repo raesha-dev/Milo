@@ -1,293 +1,607 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
-import { saveMood, analyzeSentiment } from '@/lib/api'; // API helpers for backend integration
+import { getStreakData, StreakData } from '@/lib/api';
+import { getOrCreateUserId, loadUserData, saveUserData } from '@/lib/persistence';
+import { plantSpecies } from '@/lib/plantSpecies';
+import { PlantGrowthVisualizer } from './PlantGrowthVisualizer';
+import { RewardGallery } from './RewardGallery';
+import { LeaderboardCard } from './LeaderboardCard';
+import { ArtistCredit } from './ArtistCredit';
+import { Sparkles, Trophy, Award, Gift } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
+import { Confetti } from './Confetti.tsx';
 
-interface Achievement {
-  id: string;
-  title: string;
-  description: string;
-  icon: string;
-  unlocked: boolean;
-  progress: number;
-  maxProgress: number;
-}
-
-interface Plant {
+interface Reward {
   id: string;
   name: string;
-  stage: number;
-  maxStage: number;
-  emoji: string;
-  growthPoints: number;
+  type: 'sticker' | 'avatar' | 'badge';
+  artist: string;
+  artistHandle: string;
+  imageUrl: string;
+  unlocked: boolean;
+  rarity: 'common' | 'rare' | 'legendary';
+}
+
+interface RewardCycleWinner {
+  username: string;
+  rewardName: string;
+  artist: {
+    name: string;
+    handle: string;
+    avatar: string;
+    rewardsCreated: number;
+  };
 }
 
 export const GrowthGarden: React.FC = () => {
-  // Helper to calculate stage dynamically from growthPoints
-  const calculateStage = (growthPoints: number, maxStage: number) => {
-    return Math.min(Math.floor(growthPoints / 25) + 1, maxStage);
-  };
+  const [streakData, setStreakData] = useState<StreakData | null>(null);
+  const [selectedPlantId, setSelectedPlantId] = useState('cherry');
+  const [totalWeeks, setTotalWeeks] = useState(0);
+  const [currentWeek, setCurrentWeek] = useState(0);
+  const [rewards, setRewards] = useState<Reward[]>([]);
+  const [showRewardCycle, setShowRewardCycle] = useState(false);
+  const [cycleWinners, setCycleWinners] = useState<RewardCycleWinner[]>([]);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const { toast } = useToast();
 
-  // Initialize plants with stage computed from growthPoints
-  const initialPlants: Plant[] = [
-    { id: '1', name: 'Mood Flower', growthPoints: 50, maxStage: 5, emoji: '🌸', stage: calculateStage(50, 5) },
-    { id: '2', name: 'Calm Tree', growthPoints: 40, maxStage: 4, emoji: '🌳', stage: calculateStage(40, 4) },
-    { id: '3', name: 'Confidence Rose', growthPoints: 20, maxStage: 3, emoji: '🌹', stage: calculateStage(20, 3) },
+  // Mock leaderboard data
+  const leaderboardEntries = [
+    { rank: 1, username: 'Alice', streak: 28, totalWeeks: 4, currentPlant: '🌸', rewardsEarned: 8 },
+    { rank: 2, username: 'Bob', streak: 21, totalWeeks: 3, currentPlant: '🌲', rewardsEarned: 6 },
+    { rank: 3, username: 'Clara', streak: 14, totalWeeks: 2, currentPlant: '🍁', rewardsEarned: 4 },
+    { rank: 4, username: 'David', streak: 14, totalWeeks: 2, currentPlant: '🌸', rewardsEarned: 3 },
+    { rank: 5, username: 'Emma', streak: 7, totalWeeks: 1, currentPlant: '🌱', rewardsEarned: 2 },
   ];
 
-  const [totalGrowthPoints, setTotalGrowthPoints] = useState(150);
-  const [plants, setPlants] = useState<Plant[]>(initialPlants);
+  // Initialize rewards
+  useEffect(() => {
+    const initialRewards: Reward[] = [
+      {
+        id: '1',
+        name: 'Cozy Theme',
+        type: 'sticker',
+        artist: 'Arya Smith',
+        artistHandle: '@artist_arya',
+        imageUrl: '✨',
+        unlocked: false,
+        rarity: 'common'
+      },
+      {
+        id: '2',
+        name: 'Trendy Vibe',
+        type: 'sticker',
+        artist: 'Reese Johnson',
+        artistHandle: '@artist_reese',
+        imageUrl: '🎨',
+        unlocked: false,
+        rarity: 'rare'
+      },
+      {
+        id: '3',
+        name: 'Galaxy Avatar',
+        type: 'avatar',
+        artist: 'Luna Park',
+        artistHandle: '@luna_creates',
+        imageUrl: '🌌',
+        unlocked: false,
+        rarity: 'legendary'
+      },
+      {
+        id: '4',
+        name: 'Growth Badge',
+        type: 'badge',
+        artist: 'Max Chen',
+        artistHandle: '@maxchenart',
+        imageUrl: '🏆',
+        unlocked: false,
+        rarity: 'rare'
+      },
+      {
+        id: '5',
+        name: 'Zen Garden',
+        type: 'sticker',
+        artist: 'Sarah Kim',
+        artistHandle: '@zen_sarah',
+        imageUrl: '🧘',
+        unlocked: false,
+        rarity: 'common'
+      },
+      {
+        id: '6',
+        name: 'Rainbow Avatar',
+        type: 'avatar',
+        artist: 'Alex Rivera',
+        artistHandle: '@alex_colors',
+        imageUrl: '🌈',
+        unlocked: false,
+        rarity: 'legendary'
+      }
+    ];
+    setRewards(initialRewards);
+  }, []);
 
-  const [achievements, setAchievements] = useState<Achievement[]>([
-    { id: '1', title: 'First Steps', description: 'Log your first mood', icon: '👶', unlocked: true, progress: 1, maxProgress: 1 },
-    { id: '2', title: 'Consistent Tracker', description: 'Log moods for 7 days', icon: '📅', unlocked: false, progress: 3, maxProgress: 7 },
-    { id: '3', title: 'Calm Master', description: 'Complete 10 calm sessions', icon: '🧘‍♀️', unlocked: false, progress: 4, maxProgress: 10 },
-    { id: '4', title: 'Garden Keeper', description: 'Reach 200 growth points', icon: '🌻', unlocked: false, progress: totalGrowthPoints, maxProgress: 200 },
-  ]);
+  // Load streak data from MoodLogger
+  useEffect(() => {
+    const loadStreakData = async () => {
+      try {
+        const data = await getStreakData();
+        setStreakData(data);
 
-  // When plants are updated later (e.g., in logMoodAndGrow),
-  // recalculate their stage as follows:
-  // setPlants(prevPlants =>
-  //   prevPlants.map((plant) => {
-  //     const newStage = calculateStage(plant.growthPoints, plant.maxStage);
-  //     return { ...plant, stage: newStage };
-  //   })
-  // );
+        // persist streak data for quick reload/offline fallback
+        try {
+          const userId = getOrCreateUserId();
+          saveUserData(userId, 'streakData', data);
+        } catch (err) {
+          console.warn('Failed to persist streak data locally', err);
+        }
 
-  
+        // Calculate weeks based on total days
+        const weeks = Math.floor(data.totalDays / 7);
+        setTotalWeeks(weeks);
+        setCurrentWeek(weeks);
 
+        // Try to fetch persisted rewards from backend
+        try {
+          const res = await fetch('/api/rewards');
+          if (res.ok) {
+            const payload = await res.json();
+            if (Array.isArray(payload.rewards)) {
+              setRewards(payload.rewards);
+              return;
+            }
+          }
+        } catch (err) {
+          // silently fall back to client-side rewards
+          console.warn('Failed to load persisted rewards:', err);
+        }
 
-  // Calculate emoji based on plant stage
-  const getPlantStageEmoji = (plant: Plant) => {
-    const stages: Record<number, string> = {
-      1: '🌱',
-      2: '🌿',
-      3: plant.emoji,
-      4: plant.emoji + '✨',
-      5: plant.emoji + '🌟',
+        // Unlock rewards every 2 weeks (client fallback)
+        const rewardsToUnlock = Math.floor(weeks / 2);
+        setRewards(prev => 
+          prev.map((reward, idx) => ({
+            ...reward,
+            unlocked: idx < rewardsToUnlock
+          }))
+        );
+      } catch (err) {
+        console.warn('Failed to load streak data:', err);
+        // try to load persisted streak data
+        try {
+          const userId = getOrCreateUserId();
+          const local = loadUserData<StreakData>(userId, 'streakData');
+          if (local) {
+            setStreakData(local);
+            const weeks = Math.floor(local.totalDays / 7);
+            setTotalWeeks(weeks);
+            setCurrentWeek(weeks);
+            const rewardsToUnlock = Math.floor(weeks / 2);
+            setRewards(prev => prev.map((reward, idx) => ({ ...reward, unlocked: idx < rewardsToUnlock })));
+            return;
+          }
+        } catch (e) {
+          console.warn('Failed to load persisted streak data', e);
+        }
+      }
     };
-    return stages[Math.min(plant.stage, 5)] || '🌱';
+
+    loadStreakData();
+
+    // Refresh every minute to catch updates
+    const interval = setInterval(loadStreakData, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Unlock a reward via backend and fetch signed asset URL if available
+  const unlockReward = async (rewardId: string) => {
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 3000);
+    
+    try {
+      const res = await fetch('/api/rewards/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rewardId })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Unlock failed: ${res.statusText}`);
+      }
+
+      const payload = await res.json();
+      // payload.reward could include updated unlocked state and imageUrl (signed)
+      setRewards(prev => prev.map(r => r.id === rewardId ? { ...r, ...payload.reward } : r));
+      toast({ 
+        title: '🎉 Reward unlocked!', 
+        description: payload.reward?.name || 'New reward available' 
+      });
+    } catch (err) {
+      console.warn('Unlock reward failed, falling back to client unlock:', err);
+      // Fallback: unlock locally
+      setRewards(prev => prev.map(r => r.id === rewardId ? { ...r, unlocked: true } : r));
+      toast({ 
+        title: '✨ Reward unlocked!', 
+        description: 'Reward unlocked locally due to network issues' 
+      });
+    }
   };
 
-  const getNextPlantStage = (plant: Plant) => {
-    if (plant.stage >= plant.maxStage) return null;
-    const pointsNeeded = (plant.stage + 1) * 25;
-    return pointsNeeded - plant.growthPoints;
-  };
+  // Ensure rewards unlocking happens sequentially and only once per milestone
+  const unlockingRef = useRef(false);
+  useEffect(() => {
+    const tryAutoUnlock = async () => {
+      if (!streakData || unlockingRef.current) return;
+      // only auto-unlock when a 14-day streak (or multiples) reached
+      if (streakData.currentStreak >= 14) {
+        // use a local marker to avoid duplicate unlocks across reloads
+        const key = `rewards_unlocked_until_${streakData.currentStreak}`;
+        if (localStorage.getItem(key)) return;
 
-  const logMoodAndGrow = async (growthIncrement: number) => {
-  const moodEntry = {
-    userId: 'anonymous',
-    mood: 'happy',
-    timestamp: new Date().toISOString(),
-    sentiment: { score: 0.8, magnitude: 0.5, classification: 'positive' }
-  };
-
-  try {
-    await saveMood(moodEntry);
-
-    setTotalGrowthPoints((prevTotal) => {
-      const newTotal = prevTotal + growthIncrement;
-
-      setPlants((prevPlants) =>
-        prevPlants.map((plant) => {
-          if (plant.stage < plant.maxStage) {
-            const newPoints = plant.growthPoints + growthIncrement / prevPlants.length;
-            const newStage = Math.min(Math.floor(newPoints / 25) + 1, plant.maxStage);
-            return {
-              ...plant,
-              growthPoints: Math.min(newPoints, plant.maxStage * 25),
-              stage: newStage,
-            };
+        unlockingRef.current = true;
+        try {
+          // find next locked reward(s) and unlock one by one
+          const locked = rewards.filter(r => !r.unlocked);
+          for (const r of locked.slice(0, 1)) { // unlock one by default
+            await unlockReward(r.id);
+            // small pause for UX
+            await new Promise(res => setTimeout(res, 500));
           }
-          return plant;
-        })
-      );
+          localStorage.setItem(key, '1');
+        } catch (err) {
+          console.warn('Auto-unlock failed', err);
+        } finally {
+          unlockingRef.current = false;
+        }
+      }
+    };
 
-      setAchievements((prevAchievements) =>
-        prevAchievements.map((ach) => {
-          if (ach.id === '4') {
-            return { ...ach, progress: newTotal, unlocked: newTotal >= ach.maxProgress };
-          }
-          return ach;
-        })
-      );
+    tryAutoUnlock();
+  }, [streakData, rewards]);
 
-      return newTotal;
+  const selectedPlant = plantSpecies.find(p => p.id === selectedPlantId) || plantSpecies[0];
+  const progressPercentage = streakData ? (streakData.currentStreak / 14) * 100 : 0;
+
+  const handleRunRewardCycle = () => {
+    // Mock reward cycle - randomly select winners
+    const mockWinners: RewardCycleWinner[] = [
+      {
+        username: 'Alice',
+        rewardName: 'Cozy Theme',
+        artist: {
+          name: 'Arya Smith',
+          handle: '@artist_arya',
+          avatar: '👩‍🎨',
+          rewardsCreated: 12
+        }
+      },
+      {
+        username: 'Clara',
+        rewardName: 'Trendy Vibe',
+        artist: {
+          name: 'Reese Johnson',
+          handle: '@artist_reese',
+          avatar: '🎨',
+          rewardsCreated: 8
+        }
+      },
+      {
+        username: 'Bob',
+        rewardName: 'Galaxy Avatar',
+        artist: {
+          name: 'Luna Park',
+          handle: '@luna_creates',
+          avatar: '🌙',
+          rewardsCreated: 15
+        }
+      }
+    ];
+
+    setCycleWinners(mockWinners);
+    setShowRewardCycle(true);
+    setShowConfetti(true);
+    
+    toast({
+      title: '🎉 Reward Cycle Complete!',
+      description: `${mockWinners.length} users earned new rewards!`,
     });
 
-  } catch (error) {
-    console.error('Error logging mood or updating garden:', error);
+    // Simulate unlocking rewards
+    setRewards(prev => 
+      prev.map((reward, idx) => ({
+        ...reward,
+        unlocked: idx < 3 ? true : reward.unlocked
+      }))
+    );
+
+    // Hide confetti after 3 seconds
+    setTimeout(() => setShowConfetti(false), 3000);
+  };
+
+  if (!streakData) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin text-6xl">🌱</div>
+      </div>
+    );
   }
-};
-
-  // Optional: Example hook or effect could analyze sentiment periodically or on mood change
-  // async function analyzeLatestMood(moodText: string) {
-  //   const sentimentResponse = await analyzeSentiment(moodText);
-  //   console.log('Mood sentiment:', sentimentResponse);
-  // }
-  // Optional: Example hook or effect could analyze sentiment periodically or on mood change
-async function analyzeLatestMood(moodText: string) {
-  try {
-    const sentimentResponse = await fetch("http://localhost:8080/api/analyze_latest_mood", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ moodText }),
-    });
-
-    if (!sentimentResponse.ok) throw new Error("Failed to analyze mood");
-
-    const data = await sentimentResponse.json();
-    console.log("Mood sentiment:", data);
-
-    // Safe optional diagnostic – no state change
-    return data;
-  } catch (error) {
-    console.error("Error analyzing mood sentiment:", error);
-  }
-}
-
 
   return (
-    <div className="p-4 h-full overflow-y-auto bg-white/10 backdrop-blur-sm">
-      {/* Header */}
-      <div className="mb-6">
-        <h2 className="text-white text-2xl font-bold mb-2">🌸 My Growth Garden</h2>
-        <p className="text-white/80">Collect new rewards on emotional wellness bloom with every step</p>
-      </div>
-
-      {/* Growth Points Overview */}
-      <Card className="mb-6 bg-white/90 backdrop-blur-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center justify-between">
-            <span>🌟 Total Growth Points</span>
-            <Badge variant="secondary" className="text-lg px-3 py-1">
-              {totalGrowthPoints} pts
-            </Badge>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span>Next Milestone</span>
-                <span>{Math.ceil(totalGrowthPoints / 100) * 100} pts</span>
-              </div>
-              <Progress value={totalGrowthPoints % 100} />
-              <p className="text-xs text-muted-foreground mt-1">
-                {100 - (totalGrowthPoints % 100)} points to unlock new plant! 🌺
-              </p>
-            </div>
-            <Button onClick={() => logMoodAndGrow(10)} className="mt-2 w-full">
-              Log Mood & Grow Garden +10 pts
-            </Button>
+    <>
+    <div className="growthgarden">
+      <Confetti active={showConfetti} />
+      <div className="w-full p-3 md:p-6 min-h-screen">
+        <div className="max-w-6xl mx-auto space-y-6 pb-12">
+        {/* Header */}
+        <div className="text-center space-y-3 animate-fade-in pt-4">
+          <div className="inline-block">
+            <h1 className="text-4xl md:text-6xl font-bold bg-gradient-to-r from-primary via-accent to-primary bg-clip-text text-transparent animate-glow-pulse">
+              🌳 Growth Garden
+            </h1>
           </div>
-        </CardContent>
-      </Card>
+          <p className="text-muted-foreground text-base md:text-lg max-w-2xl mx-auto">
+            Nurture your consistency, watch your growth bloom ✨
+          </p>
+        </div>
 
-      {/* Plants Garden */}
-      <div className="mb-6">
-        <h3 className="text-white text-lg font-semibold mb-3">🏡 Your Plants</h3>
-        <div className="grid gap-4">
-          {plants.map((plant) => {
-            const nextStagePoints = getNextPlantStage(plant);
-            return (
-              <Card key={plant.id} className="bg-white/90 backdrop-blur-sm">
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center space-x-3">
-                      <span className="text-4xl">{getPlantStageEmoji(plant)}</span>
-                      <div>
-                        <h4 className="font-semibold">{plant.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          Stage {plant.stage}/{plant.maxStage}
-                        </p>
-                      </div>
-                    </div>
-                    <Badge variant={plant.stage >= plant.maxStage ? 'default' : 'secondary'}>
-                      {plant.stage >= plant.maxStage ? 'Fully Grown!' : `${Math.floor(plant.growthPoints)} pts`}
-                    </Badge>
-                  </div>
-                  {plant.stage < plant.maxStage && (
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span>Growth Progress</span>
-                        <span>{nextStagePoints} pts to next stage</span>
-                      </div>
-                      <Progress value={((plant.growthPoints % 25) / 25) * 100} />
+        {/* Streak Overview */}
+        <Card 
+          className="animate-scale-in border-2 overflow-hidden relative group"
+          style={{ 
+            boxShadow: 'var(--shadow-card)',
+            background: 'var(--gradient-card)'
+          }}
+        >
+          {/* Decorative Glow */}
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none"
+            style={{ background: 'var(--gradient-glow)' }} 
+          />
+          
+          <CardHeader className="relative">
+            <CardTitle className="flex items-center gap-3 text-2xl">
+              <div className="p-2 rounded-xl bg-primary/10">
+                <Sparkles className="w-7 h-7 text-primary animate-sparkle" />
+              </div>
+              Current Progress
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6 p-6 relative">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <p className="text-5xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent animate-bounce-in">
+                  {streakData.currentStreak}
+                </p>
+                <p className="text-sm text-muted-foreground font-medium">days streak 🔥</p>
+              </div>
+              <Badge 
+                className="text-base px-4 py-2 animate-bounce-in"
+                style={{ 
+                  background: 'var(--gradient-primary)',
+                  animationDelay: '0.2s'
+                }}
+              >
+                Week {currentWeek}
+              </Badge>
+            </div>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Progress to next reward</span>
+                <span className="text-lg font-bold text-primary">{Math.min(progressPercentage, 100).toFixed(0)}%</span>
+              </div>
+              
+              {/* Enhanced Progress Bar */}
+              <div className="relative h-4 bg-secondary rounded-full overflow-hidden shadow-inner">
+                <div 
+                  className="absolute top-0 left-0 h-full rounded-full transition-all duration-1000 animate-glow-pulse"
+                  style={{ 
+                    width: `${progressPercentage}%`,
+                    background: 'var(--gradient-primary)'
+                  }}
+                />
+              </div>
+              
+              <div className={`
+                text-center p-4 rounded-xl transition-all duration-500
+                ${streakData.currentStreak >= 14 
+                  ? 'animate-reward-pop' 
+                  : ''
+                }
+              `}
+                style={{
+                  background: streakData.currentStreak >= 14 
+                    ? 'var(--gradient-celebration)' 
+                    : 'var(--gradient-glow)'
+                }}
+              >
+                <p className="text-sm font-semibold">
+                  {streakData.currentStreak >= 14 
+                    ? '🎉 You\'ve earned a reward! Keep the momentum going!' 
+                    : `✨ ${14 - streakData.currentStreak} more days until your next reward`}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Plant Selection */}
+        <Card 
+          className="animate-fade-in border-2 overflow-hidden"
+          style={{ 
+            boxShadow: 'var(--shadow-card)',
+            background: 'var(--gradient-card)'
+          }}
+        >
+          <CardHeader>
+            <CardTitle className="text-xl">🌺 Choose Your Growth Journey</CardTitle>
+          </CardHeader>
+          <CardContent className="p-6">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              {plantSpecies.map((plant, idx) => (
+                <button
+                  key={plant.id}
+                  onClick={() => setSelectedPlantId(plant.id)}
+                  className={`
+                    relative h-auto py-6 px-4 flex flex-col gap-2 items-center
+                    rounded-2xl border-2 transition-all duration-500
+                    hover:scale-105 hover:shadow-xl
+                    animate-scale-in
+                    ${selectedPlantId === plant.id 
+                      ? 'border-primary shadow-lg' 
+                      : 'border-border hover:border-primary/50'
+                    }
+                  `}
+                  style={{
+                    background: selectedPlantId === plant.id 
+                      ? 'var(--gradient-glow)' 
+                      : 'var(--card)',
+                    animationDelay: `${idx * 0.1}s`
+                  }}
+                >
+                  {selectedPlantId === plant.id && (
+                    <div className="absolute top-2 right-2 animate-bounce-in">
+                      <Sparkles className="w-5 h-5 text-primary fill-primary" />
                     </div>
                   )}
-                </CardContent>
-              </Card>
-            );
-          })}
+                  <span className="text-4xl transition-transform duration-300 hover:scale-110">
+                    {plant.stages[plant.stages.length - 1].emoji}
+                  </span>
+                  <span className="text-sm font-semibold text-center">{plant.name}</span>
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
 
-          {/* New Plant Slot */}
-          <Card className="bg-white/50 backdrop-blur-sm border-dashed border-2">
-            <CardContent className="p-4 text-center">
-              <div className="text-4xl mb-2">🌱</div>
-              <p className="text-muted-foreground text-sm">
-                New plant unlocks at {Math.ceil(totalGrowthPoints / 100) * 100} points!
+        {/* Plant Growth Visualizer */}
+        <div className="animate-plant-grow">
+          <PlantGrowthVisualizer
+            species={selectedPlant}
+            currentWeek={currentWeek}
+            totalWeeks={totalWeeks}
+          />
+        </div>
+
+        {/* Reward Gallery */}
+        <Card 
+          className="border-2 overflow-hidden"
+          style={{ 
+            boxShadow: 'var(--shadow-reward)',
+            background: 'var(--gradient-card)'
+          }}
+        >
+          <CardHeader className="relative overflow-hidden">
+            <div className="absolute inset-0 opacity-10"
+              style={{ background: 'var(--gradient-reward)' }}
+            />
+            <CardTitle className="flex items-center gap-3 text-2xl relative">
+              <div className="p-2 rounded-xl bg-accent/10">
+                <Gift className="w-7 h-7 text-accent animate-sparkle" />
+              </div>
+              Your Rewards Collection
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-6">
+            <RewardGallery rewards={rewards} />
+          </CardContent>
+        </Card>
+
+        {/* Leaderboard */}
+        <div className="animate-fade-in">
+          <LeaderboardCard entries={leaderboardEntries} />
+        </div>
+
+        {/* Admin: Run Reward Cycle */}
+        <Card 
+          className="border-2"
+          style={{ 
+            boxShadow: 'var(--shadow-card)',
+            background: 'var(--gradient-card)'
+          }}
+        >
+          <CardHeader>
+            <CardTitle className="flex items-center gap-3 text-xl">
+              <div className="p-2 rounded-xl bg-accent/10">
+                <Award className="w-6 h-6 text-accent animate-sparkle" />
+              </div>
+              Admin: Reward Cycle
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 p-6">
+            <div className="p-4 rounded-xl" style={{ background: 'var(--gradient-glow)' }}>
+              <p className="text-sm font-medium">
+                Run the reward cycle to distribute rewards to all users who completed 2 weeks of consistent mood logging.
               </p>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      {/* Achievements */}
-      <div>
-        <h3 className="text-white text-lg font-semibold mb-3">🏆 Achievements</h3>
-        <div className="grid gap-3">
-          {achievements.map((achievement) => (
-            <Card
-              key={achievement.id}
-              className={`${
-                achievement.unlocked
-                  ? 'bg-gradient-to-r from-yellow-100 to-orange-100 border-yellow-300'
-                  : 'bg-white/90 backdrop-blur-sm'
-              }`}
+            </div>
+            <button
+              onClick={handleRunRewardCycle}
+              className="w-full py-4 px-6 rounded-xl font-semibold text-lg
+                transition-all duration-500 hover:scale-[1.02] hover:shadow-2xl
+                flex items-center justify-center gap-3"
+              style={{ 
+                background: 'var(--gradient-celebration)',
+                color: 'hsl(var(--celebration-foreground))',
+                boxShadow: 'var(--shadow-elegant)'
+              }}
             >
-              <CardContent className="p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-3">
-                    <span className={`text-2xl ${achievement.unlocked ? 'grayscale-0' : 'grayscale'}`}>
-                      {achievement.icon}
-                    </span>
-                    <div>
-                      <h4 className={`font-medium ${achievement.unlocked ? 'text-yellow-800' : ''}`}>
-                        {achievement.title}
-                      </h4>
-                      <p
-                        className={`text-sm ${
-                          achievement.unlocked ? 'text-yellow-700' : 'text-muted-foreground'
-                        }`}
-                      >
-                        {achievement.description}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    {achievement.unlocked ? (
-                      <Badge className="bg-yellow-500 text-white">Unlocked!</Badge>
-                    ) : (
-                      <div className="text-xs text-muted-foreground">
-                        {achievement.progress}/{achievement.maxProgress}
-                      </div>
-                    )}
-                  </div>
+              <Trophy className="w-6 h-6" />
+              Run Reward Cycle
+            </button>
+
+            {showRewardCycle && cycleWinners.length > 0 && (
+              <div className="space-y-4 mt-6 animate-fade-in">
+                <h3 className="font-semibold text-lg">🎉 Latest Winners</h3>
+                <div className="space-y-3">
+                  {cycleWinners.map((winner, idx) => (
+                    <ArtistCredit
+                      key={idx}
+                      artist={winner.artist}
+                      rewardName={winner.rewardName}
+                      animated={true}
+                    />
+                  ))}
                 </div>
-                {!achievement.unlocked && (
-                  <div className="mt-2">
-                    <Progress value={(achievement.progress / achievement.maxProgress) * 100} className="h-1" />
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Artist Credits Info */}
+        <Card 
+          className="border-2"
+          style={{ 
+            boxShadow: 'var(--shadow-card)',
+            background: 'var(--gradient-card)'
+          }}
+        >
+          <CardHeader>
+            <CardTitle className="text-xl">💝 About Rewards</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 p-6">
+            <p className="text-sm leading-relaxed">
+              All stickers, avatars, and badges are created by talented artists in our community. 
+              Artists can submit their work and get featured when users earn their rewards!
+            </p>
+            <div 
+              className="p-6 rounded-2xl border-2 border-primary/20 transition-all duration-500 hover:scale-[1.02] cursor-pointer"
+              style={{ background: 'var(--gradient-glow)' }}
+            >
+              <p className="text-base font-semibold mb-2 flex items-center gap-2">
+                <span>🎨</span> Want to contribute as an artist?
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Submit your artwork and promote your work through our reward system!
+              </p>
+              <div className="mt-4 inline-block px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium">
+                Learn More →
+              </div>
+            </div>
+          </CardContent>
+        </Card>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 };

@@ -140,6 +140,135 @@ All colors MUST be HSL.
     --sidebar-border: 240 3.7% 15.9%;
     --sidebar-ring: 217.2 91.2% 59.8%;
   }
+  .growthgarden {
+  
+
+  /* Scoped design system variables for GrowthGarden */
+  --background: 250 60% 97%;
+  --foreground: 250 40% 15%;
+  --card: 0 0% 100%;
+  --card-foreground: 250 35% 20%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 250 35% 20%;
+
+  /* Soft Violet Primary */
+  --primary: 270 65% 65%;
+  --primary-foreground: 0 0% 100%;
+  --primary-glow: 270 75% 75%;
+
+  /* Pastel Blue Secondary */
+  --secondary: 220 50% 90%;
+  --secondary-foreground: 250 40% 20%;
+
+  /* Muted pastel tones */
+  --muted: 240 30% 94%;
+  --muted-foreground: 240 20% 55%;
+
+  /* Soft Pink Accent */
+  --accent: 320 60% 75%;
+  --accent-foreground: 250 40% 15%;
+  --accent-glow: 320 70% 80%;
+
+  /* Pastel celebration colors */
+  --celebration: 280 60% 75%;
+  --celebration-foreground: 250 40% 15%;
+
+  --destructive: 350 70% 70%;
+  --destructive-foreground: 0 0% 100%;
+
+  --border: 240 30% 88%;
+  --input: 240 30% 92%;
+  --ring: 270 65% 65%;
+
+  --radius: 1rem;
+
+  /* Violet-Blue Pastel Gradients */
+  --gradient-primary: linear-gradient(135deg, hsl(270 65% 65%), hsl(240 70% 70%));
+  --gradient-celebration: linear-gradient(135deg, hsl(280 60% 75%), hsl(320 60% 75%));
+  --gradient-glow: linear-gradient(135deg, hsl(270 75% 75% / 0.15), hsl(240 70% 70% / 0.15));
+  --gradient-card: linear-gradient(180deg, hsl(0 0% 100%), hsl(245 40% 97%));
+  --gradient-reward: linear-gradient(135deg, hsl(320 60% 75%), hsl(280 65% 70%));
+
+  /* Soft Shadows */
+  --shadow-card: 0 8px 32px hsl(270 50% 60% / 0.1);
+  --shadow-glow: 0 0 40px hsl(270 75% 75% / 0.25);
+  --shadow-reward: 0 12px 48px hsl(320 60% 75% / 0.25);
+  --shadow-elegant: 0 4px 16px hsl(250 30% 50% / 0.08);
+
+  /* Animations */
+  --transition-smooth: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-bounce: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+  --sidebar-background: 0 0% 98%;
+
+  --sidebar-foreground: 240 5.3% 26.1%;
+
+  --sidebar-primary: 240 5.9% 10%;
+
+  --sidebar-primary-foreground: 0 0% 98%;
+
+  --sidebar-accent: 240 4.8% 95.9%;
+
+  --sidebar-accent-foreground: 240 5.9% 10%;
+
+  --sidebar-border: 220 13% 91%;
+
+  --sidebar-ring: 217.2 91.2% 59.8%;
+}
+
+.growthgarden.dark {
+  --background: 250 30% 10%;
+  --foreground: 250 20% 95%;
+  --card: 250 25% 14%;
+  --card-foreground: 250 20% 95%;
+
+  --popover: 250 25% 14%;
+  --popover-foreground: 250 20% 95%;
+
+  --primary: 270 65% 60%;
+  --primary-foreground: 250 30% 10%;
+  --primary-glow: 270 75% 70%;
+
+  --secondary: 240 30% 22%;
+  --secondary-foreground: 250 20% 95%;
+
+  --muted: 240 25% 18%;
+  --muted-foreground: 240 20% 70%;
+
+  --accent: 320 60% 65%;
+  --accent-foreground: 250 30% 10%;
+  --accent-glow: 320 70% 75%;
+
+  --celebration: 280 60% 65%;
+  --celebration-foreground: 250 30% 10%;
+
+  --destructive: 350 65% 60%;
+  --destructive-foreground: 250 20% 95%;
+
+  --border: 240 25% 25%;
+  --input: 240 25% 18%;
+  --ring: 270 65% 60%;
+
+  --gradient-primary: linear-gradient(135deg, hsl(270 65% 60%), hsl(240 70% 65%));
+  --gradient-celebration: linear-gradient(135deg, hsl(280 60% 65%), hsl(320 60% 65%));
+  --gradient-glow: linear-gradient(135deg, hsl(270 75% 70% / 0.2), hsl(240 70% 65% / 0.2));
+  --gradient-card: linear-gradient(180deg, hsl(250 25% 14%), hsl(250 30% 12%));
+  --gradient-reward: linear-gradient(135deg, hsl(320 60% 65%), hsl(280 65% 60%));
+
+  --shadow-card: 0 8px 32px hsl(0 0% 0% / 0.5);
+  --shadow-glow: 0 0 40px hsl(270 75% 70% / 0.3);
+  --shadow-reward: 0 12px 48px hsl(320 60% 65% / 0.4);
+  --shadow-elegant: 0 4px 16px hsl(0 0% 0% / 0.4);
+  --sidebar-background: 240 5.9% 10%;
+  --sidebar-foreground: 240 4.8% 95.9%;
+  --sidebar-primary: 224.3 76.3% 48%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 240 3.7% 15.9%;
+  --sidebar-accent-foreground: 240 4.8% 95.9%;
+  --sidebar-border: 240 3.7% 15.9%;
+  --sidebar-ring: 217.2 91.2% 59.8%;
+}
 }
 
 @layer base {
@@ -358,4 +487,5 @@ All colors MUST be HSL.
   ::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--muted-foreground) / 0.5);
   }
+  
 }

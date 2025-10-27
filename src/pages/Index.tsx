@@ -25,10 +25,9 @@ const Index = () => {
   };
 
   return (
-    <div className="w-full h-screen">
+    <div className="w-full">
       <MiloApp isDarkMode={isDarkMode} onToggleTheme={toggleTheme} />
-    </div>
-    
+    </div> 
   );
 };
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -13,6 +13,7 @@ import {
   MoreVertical, Plus, Bell, BellOff, Palette
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { getOrCreateUserId, loadUserData, saveUserData, appendUserArray } from '@/lib/persistence';
 import { 
   saveAnonymousMessage, 
   createAnonymousUserId,
@@ -52,17 +53,9 @@ interface FriendSuggestion {
 }
 
 // Backend API base URL (configurable via env)
-const API_ROOT = import.meta.env.VITE_BACKEND_API || "http://localhost:5000/api";
+const API_ROOT = import.meta.env.VITE_BACKEND_API || "http://localhost:8080/api";
 
-// Get or create anonymous user ID
-const getUserId = (): string => {
-  let userId = localStorage.getItem('milo_user_id');
-  if (!userId) {
-    userId = createAnonymousUserId();
-    localStorage.setItem('milo_user_id', userId);
-  }
-  return userId;
-};
+// use central getOrCreateUserId from persistence helper
 
 // Fetch support rooms data from backend Firestore collection
 async function fetchSupportRooms(): Promise<SupportRoom[]> {
@@ -388,7 +381,12 @@ export const SupportRooms: React.FC = () => {
   });
   
   // Get current user ID
-  const userId = getUserId();
+  const userId = getOrCreateUserId();
+
+  // message refs for deterministic ordering and offline queue
+  const messageRefs = useRef<Map<string, AnonymousMessage>>(new Map<string, AnonymousMessage>());
+  const offlineQueue = useRef<AnonymousMessage[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
 
   const themeOptions: { value: BackgroundTheme; label: string; color: string }[] = [
     { value: 'violet', label: '💜 Violet Dream', color: 'bg-gradient-to-br from-purple-200 to-violet-100' },
@@ -423,9 +421,45 @@ export const SupportRooms: React.FC = () => {
     }
     (async () => {
       const msgs = await fetchMessages(selectedRoom.id);
-      setMessages(msgs);
+      // populate refs and set ordered messages
+  messageRefs.current.clear();
+  msgs.forEach((m: AnonymousMessage) => messageRefs.current.set(m.id, m));
+  const vals = Array.from(messageRefs.current.values());
+  const sorted = (vals as AnonymousMessage[]).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+  // merge with any locally persisted room messages for this user
+  try {
+    const persisted = loadUserData<AnonymousMessage[]>(userId, `room_${selectedRoom.id}_messages`);
+    if (persisted && persisted.length) {
+      const parsed = persisted.map(p => ({ ...p, timestamp: new Date(p.timestamp) }));
+      // merge and dedupe by id, prefer persisted (more recent local) then backend
+      const map = new Map<string, AnonymousMessage>();
+      parsed.forEach(p => map.set(p.id, p));
+      sorted.forEach(s => { if (!map.has(s.id)) map.set(s.id, s); });
+      const merged = Array.from(map.values()).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+      messageRefs.current.clear();
+      merged.forEach((m) => messageRefs.current.set(m.id, m));
+      setMessages(merged);
+    } else {
+      setMessages(sorted);
+    }
+  } catch (e) {
+    console.warn('Failed to merge persisted room messages', e);
+    setMessages(sorted);
+  }
     })();
   }, [selectedRoom]);
+
+  // Persist messages per-room for this user whenever messages change
+  useEffect(() => {
+    try {
+      if (!selectedRoom) return;
+      // store serializable form
+      const serializable = messages.map(m => ({ ...m, timestamp: m.timestamp.toISOString() }));
+      saveUserData(userId, `room_${selectedRoom.id}_messages`, serializable);
+    } catch (err) {
+      console.warn('Failed to persist room messages', err);
+    }
+  }, [messages, selectedRoom, userId]);
 
   // NEW: Handle sending a message
   const handleSendMessage = async () => {
@@ -448,6 +482,8 @@ export const SupportRooms: React.FC = () => {
       };
       
       // Add message to state immediately (optimistic update)
+      // store in refs for deterministic order
+      messageRefs.current.set(newMessage.id, newMessage);
       setMessages(prev => [newMessage, ...prev]);
       
       // Clear input field immediately
@@ -462,7 +498,8 @@ export const SupportRooms: React.FC = () => {
         hearts: 0
       };
       
-      await saveAnonymousMessage(cloudMessage);
+      // send message (handles offline queuing)
+      await sendMessage(newMessage, cloudMessage);
       
       if (notificationsEnabled) {
         toast.success('Message sent! 💜', {
@@ -476,11 +513,58 @@ export const SupportRooms: React.FC = () => {
         description: 'Please try again',
       });
       // Remove the optimistic message on error
+      messageRefs.current.delete(messages[0]?.id || '');
       setMessages(prev => prev.slice(1));
     } finally {
       setIsSending(false);
     }
   };
+
+  // sendMessage wrapper handles offline queueing and backend save
+  const sendMessage = async (local: AnonymousMessage, cloudMessage: CloudMessage) => {
+    if (!navigator.onLine) {
+      offlineQueue.current.push(local);
+      localStorage.setItem('offline_room_queue', JSON.stringify(offlineQueue.current));
+      toast.success('Offline', { description: 'Message queued and will be sent when online.' });
+      // persist queued message to user's room history
+      try { appendUserArray(userId, `room_${selectedRoom?.id}_messages`, { ...local, timestamp: local.timestamp.toISOString() }, 1000); } catch (e) { /* ignore */ }
+      return;
+    }
+
+    try {
+      await saveAnonymousMessage(cloudMessage);
+      // on success, ensure messageRefs is up to date (backend may have canonical id)
+      try { appendUserArray(userId, `room_${selectedRoom?.id}_messages`, { ...local, timestamp: local.timestamp.toISOString() }, 1000); } catch (e) { /* ignore */ }
+    } catch (err) {
+      console.error('Error saving to backend, queueing locally', err);
+      offlineQueue.current.push(local);
+      localStorage.setItem('offline_room_queue', JSON.stringify(offlineQueue.current));
+    }
+  };
+
+  // automatically try to flush offline queue when back online
+  useEffect(() => {
+    const flush = async () => {
+      setIsOnline(navigator.onLine);
+      if (!navigator.onLine) return;
+      const raw = localStorage.getItem('offline_room_queue');
+      const queued: AnonymousMessage[] = raw ? JSON.parse(raw) : [];
+      if (queued.length === 0) return;
+      for (const q of queued) {
+        try {
+          await saveAnonymousMessage({ roomId: selectedRoom?.id || '', message: q.message, mood: q.mood, timestamp: q.timestamp, hearts: q.hearts });
+        } catch (e) {
+          console.warn('Failed to flush queued message', e);
+        }
+      }
+      localStorage.removeItem('offline_room_queue');
+      offlineQueue.current = [];
+    };
+
+    window.addEventListener('online', flush);
+    if (navigator.onLine) flush();
+    return () => window.removeEventListener('online', flush);
+  }, [selectedRoom]);
 
   // NEW: Handle heart/like with toggle (Like/Unlike)
   const handleSendHeart = (messageId: string) => {

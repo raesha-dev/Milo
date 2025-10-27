@@ -8,6 +8,13 @@ export default defineConfig(({ mode }) => ({
     host: "::",
     port: 5173,
     strictPort: true,
+    hmr: {
+      overlay: true,
+    },
+    watch: {
+      usePolling: true,
+      interval: 100
+    }
   },
   // Optimized build configuration for security and performance
   esbuild: {
