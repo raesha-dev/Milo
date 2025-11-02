@@ -35,7 +35,7 @@ import threading
 import json
 import requests
 
-
+#Future Integration with Gemma trained models on data, language, sentiments, etc - now OpenAI usage
 
 systemPrompt="""You are Milo — a kind, emotionally intelligent wellbeing companion. You are a friendly conversational AI for mental wellness journaling.
 Avoid repeating greetings or asking 'How are you?' multiple times.
