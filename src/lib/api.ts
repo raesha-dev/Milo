@@ -21,6 +21,21 @@ export interface ChatBotResponse {
   confidence?: number;
 }
 
+export interface RiskAssessment {
+  isRisky?: boolean;
+  riskLevel?: 'low' | 'medium' | 'high' | string;
+  reasons?: string[] | string;
+  requiresImmediate?: boolean;
+  sentimentScore?: number;
+  sentimentMagnitude?: number;
+}
+
+// When the backend detects safety concerns it may attach this metadata
+export interface ChatBotResponseWithRisk extends ChatBotResponse {
+  riskAssessment?: RiskAssessment;
+  alertId?: string;
+}
+
 export interface MoodEntry {
   id: string;
   mood: string;
@@ -93,7 +108,7 @@ function getMockResponse(message: string): string {
  * @param message - User message text
  * @returns Bot response
  */
-export async function chatWithBot(message: string): Promise<ChatBotResponse> {
+export async function chatWithBot(message: string): Promise<ChatBotResponseWithRisk> {
   try {
     // Try backend API endpoint first
     const response = await fetch(`${API_ROOT}/chat`, {
@@ -117,7 +132,10 @@ export async function chatWithBot(message: string): Promise<ChatBotResponse> {
     return {
       response: getMockResponse(message),
       mood: 'supportive',
-    };
+      // No risk in mock fallback
+      riskAssessment: undefined,
+      alertId: undefined,
+    } as ChatBotResponseWithRisk;
   }
 }
 
@@ -243,7 +261,13 @@ export async function getRecentMoods(): Promise<MoodEntry[]> {
         method: "GET",
         headers: { "Content-Type": "application/json" },
       });
-      return checkResponse(res);
+      // Backend historically returned an array, but newer server returns
+      // an object { moods: [...], count, status }. Normalize both shapes
+      const data = await checkResponse(res);
+      if (Array.isArray(data)) return data as MoodEntry[];
+      if (data && Array.isArray((data as any).moods)) return (data as any).moods as MoodEntry[];
+      // Unexpected shape: try to be defensive
+      return [];
     } catch (error) {
       console.warn('Backend mood fetch failed, using localStorage:', error);
     }

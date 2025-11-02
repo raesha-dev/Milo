@@ -1,13 +1,22 @@
 import React, { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Phone, MessageCircle, Heart, Shield, Users, ExternalLink, Pause } from 'lucide-react';
+import { Phone, MessageCircle, Heart, Shield, Users, ExternalLink, Pause, Bell, History } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { generateTTS } from '@/lib/api'; // Assumes Google Cloud TTS endpoint in backend
+import { AlertConfirmationModal } from '@/components/AlertConfirmationModal';
+import { AlertLogViewer } from '@/components/AlertLogViewer';
+import { getEmergencySettings } from '@/components/EmergencyAlertSettings';
+import { sendEmergencyAlert } from '@/lib/alertService';
+import { useToast } from '@/hooks/use-toast';
 
 export const EmergencyHelp: React.FC = () => {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [loadingAudio, setLoadingAudio] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showLogViewer, setShowLogViewer] = useState(false);
+  const [sending, setSending] = useState(false);
+  const { toast } = useToast();
 
   const crisisResources = [
     {
@@ -91,11 +100,60 @@ export const EmergencyHelp: React.FC = () => {
     setAudioUrl(null);
   };
 
+  const handleSendAlert = async () => {
+    setSending(true);
+    try {
+      const settings = getEmergencySettings();
+      const response = await sendEmergencyAlert({
+        message: 'Emergency alert - I need help. Please check on me.',
+        severity: 'high',
+        contacts: settings.contacts,
+        demo: settings.demoMode,
+      });
+
+      toast({
+        title: settings.demoMode ? '🔔 Alert Simulated' : '✅ Alert Sent',
+        description: `Alert ID: ${response.alertId}. ${
+          settings.demoMode
+            ? 'Demo mode - no real messages sent.'
+            : `Sent to ${settings.contacts.length} contact(s).`
+        }`,
+      });
+
+      setShowConfirmModal(false);
+      // Refresh log viewer if open
+      if (showLogViewer) {
+        setTimeout(() => window.location.reload(), 1000);
+      }
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to send alert',
+        variant: 'destructive',
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const settings = getEmergencySettings();
+
   return (
     <div className="p-4 h-full overflow-y-auto bg-white/10 backdrop-blur-sm">
       {/* Header */}
       <div className="mb-6">
-        <h2 className="text-white text-2xl font-bold mb-2">🚨 Support & Safety</h2>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-white text-2xl font-bold">🚨 Support & Safety</h2>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowLogViewer(!showLogViewer)}
+            className="text-white hover:bg-white/10"
+          >
+            <History className="w-4 h-4 mr-2" />
+            {showLogViewer ? 'Hide' : 'View'} Log
+          </Button>
+        </div>
         <p className="text-white/80">You matter. Help is always available.</p>
       </div>
       {/* Emergency Alert */}
@@ -107,6 +165,43 @@ export const EmergencyHelp: React.FC = () => {
           Call 911 or go to your nearest emergency room right away.
         </AlertDescription>
       </Alert>
+
+      {/* Notify Trusted Contacts Button */}
+      <Card className="mb-6 bg-gradient-to-r from-orange-400 to-red-500 text-white">
+        <CardContent className="p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex-1">
+              <h4 className="font-semibold text-lg flex items-center gap-2">
+                <Bell className="w-5 h-5" />
+                Need Someone Now?
+              </h4>
+              <p className="text-white/90 text-sm mt-1">
+                Send an emergency alert to your trusted contacts
+              </p>
+              {settings.demoMode && (
+                <p className="text-white/80 text-xs mt-1 italic">
+                  Demo mode active - alerts will be simulated
+                </p>
+              )}
+            </div>
+            <Button
+              variant="secondary"
+              className="bg-white/20 text-white hover:bg-white/30 border-white/30"
+              onClick={() => setShowConfirmModal(true)}
+              disabled={sending}
+            >
+              Send Alert
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Alert Log Viewer */}
+      {showLogViewer && (
+        <div className="mb-6">
+          <AlertLogViewer />
+        </div>
+      )}
 
       {/* Crisis Resources */}
       <div className="mb-6">
@@ -266,6 +361,16 @@ export const EmergencyHelp: React.FC = () => {
           counselor, or therapist. This helps you prepare coping strategies for difficult moments.
         </AlertDescription>
       </Alert>
+
+      {/* Confirmation Modal */}
+      <AlertConfirmationModal
+        open={showConfirmModal}
+        onClose={() => setShowConfirmModal(false)}
+        onConfirm={handleSendAlert}
+        contacts={settings.contacts}
+        isDemo={settings.demoMode}
+        message="Emergency alert - I need help. Please check on me."
+      />
     </div>
   );
 };

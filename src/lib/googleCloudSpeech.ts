@@ -9,9 +9,6 @@
  * 2. Enable Google Cloud Translation API (for translation features)
  * 3. Enable Google Cloud Natural Language API (for sentiment analysis)
  * 4. Create a service account and download credentials
- * 5. Add GOOGLE_CLOUD_API_KEY to your environment variables
- * 
- * For production: Use Lovable Cloud edge functions to securely handle API keys
  */
 
 export interface SpeechToTextResult {

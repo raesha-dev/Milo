@@ -6,6 +6,10 @@ import logging
 from functools import wraps
 from google.api_core import retry
 from google.cloud import exceptions
+import google.auth
+import os
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account as gservice_account
 from typing import Callable, Any, Optional
 
 # Configure logging
@@ -131,11 +135,30 @@ def validate_google_credentials(client: Any) -> bool:
         bool: True if credentials are valid, False otherwise
     """
     try:
-        # Attempt a lightweight operation to validate credentials
-        if hasattr(client, '_credentials'):
-            client._credentials.refresh(None)
-            return True
-        return False
+        # If a service account JSON is explicitly provided via env var, prefer that
+        key_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if key_path:
+            try:
+                # Ensure we request a token with the cloud-platform scope so the
+                # refresh works for Google Cloud APIs. Some environments require
+                # explicit scopes when creating credentials from a key file.
+                scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+                creds = gservice_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+                creds.refresh(GoogleAuthRequest())
+                return True
+            except Exception as e:
+                logger.error(f"Service account key at {key_path} failed to validate: {e}")
+                # fall through to try ADC as a fallback
+
+        # Fallback to ADC (Application Default Credentials)
+        creds, project = google.auth.default()
+        if not creds:
+            logger.error("No application default credentials found")
+            return False
+
+        # Refresh credentials (this will raise if invalid)
+        creds.refresh(GoogleAuthRequest())
+        return True
     except Exception as e:
         logger.error(f"Failed to validate Google credentials: {str(e)}")
         return False

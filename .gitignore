@@ -21,3 +21,13 @@ backend/README-deploy.md
 backend/cloudbuild.yaml
 backend/.gcloud/
 backend/README.md
+_redirects
+dist/
+firebase-cli-debug.txt
+key.json
+firebase-debug.log
+.dockerignore
+.gcloudignore
+sample.b64
+backend/.dockerignore
+backend/.gcloudignore

@@ -7,6 +7,10 @@ import { createVoiceRecorder, VoiceRecorder } from '@/utils/voiceRecording.ts';
 import { mockTranscription, SpeechToTextResult } from '@/lib/googleCloudSpeech';
 import { useToast } from '@/hooks/use-toast';
 import { getOrCreateUserId, loadUserData, saveUserData } from '@/lib/persistence';
+import { AlertConfirmationModal } from './AlertConfirmationModal';
+import { getEmergencySettings } from './EmergencyAlertSettings';
+import { sendEmergencyAlert } from '@/lib/alertService';
+import type { AlertRequest } from '@/lib/alertService';
 
 interface Message {
   id: string;
@@ -30,6 +34,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
     }
   ]);
   const [newMessage, setNewMessage] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isSending, setIsSending] = useState(false);
   
@@ -38,6 +43,54 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const voiceRecorderRef = useRef<VoiceRecorder | null>(null);
   const { toast } = useToast();
+  // Modal / pending alert state
+  const [modalOpen, setModalOpen] = useState(false);
+  const [pendingAlert, setPendingAlert] = useState<AlertRequest | null>(null);
+
+  const handleConfirmAlert = async () => {
+    if (!pendingAlert) return;
+    try {
+      // Try server-side emergency endpoint first (safe: will require backend permissions)
+      try {
+        const response = await fetch('/api/emergency-alert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pendingAlert),
+        });
+
+        if (response.ok) {
+          const json = await response.json();
+          const alertId = json?.alertId || json?.id || 'unknown';
+          toast({
+            title: 'Alert created (server)',
+            description: `Alert ${alertId} queued on server.`,
+          });
+          setModalOpen(false);
+          setPendingAlert(null);
+          return;
+        }
+        // Non-ok response falls through to fallback below
+      } catch (networkErr) {
+        console.warn('Server emergency endpoint failed, falling back to local mock', networkErr);
+      }
+
+      // Fallback to local mock alert service (offline / demo-safe)
+      const res = await sendEmergencyAlert(pendingAlert);
+      toast({
+        title: 'Alert queued (local)',
+        description: `Alert ${res.alertId} created (${res.status})`,
+      });
+    } catch (err: any) {
+      toast({
+        title: 'Failed to send alert',
+        description: err?.message || String(err),
+        variant: 'destructive',
+      });
+    } finally {
+      setModalOpen(false);
+      setPendingAlert(null);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -122,6 +175,39 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
         };
 
         setMessages((prev) => [...prev, miloResponse]);
+
+        // If backend signaled immediate risk, prompt user for confirmation
+        try {
+          const risk = miloData?.riskAssessment;
+          if (risk && risk.requiresImmediate) {
+            // Build a helpful message for the alert modal including reasons if available
+            const reasons = Array.isArray(risk.reasons) ? risk.reasons.join('; ') : risk.reasons || '';
+            const alertMsg = reasons
+              ? `Milo detected immediate safety concerns: ${reasons}`
+              : `Milo detected potential immediate risk and recommends contacting your trusted contacts.`;
+
+            // Prepare modal state via getEmergencySettings and local flow
+            const settings = getEmergencySettings();
+            // store pending modal details in window state (minimal, non-invasive)
+            // Open modal by toggling a global event — instead of adding complex state here,
+            // call the confirmation flow directly to keep change surface small.
+            const request = {
+              userId: getOrCreateUserId(),
+              message: `${alertMsg}\n\nUser message: ${userMessage.text}`,
+              severity: 'high' as const,
+              contacts: settings.contacts,
+              demo: settings.demoMode,
+            };
+
+            // Ask user via the AlertConfirmationModal flow: show modal and on confirm send
+            // We'll trigger the modal imperatively by rendering it below; stash request in ref
+            setPendingAlert(request);
+            setModalOpen(true);
+          }
+        } catch (err) {
+          // Non-blocking: if modal flow fails, ignore and continue
+          console.warn('Failed to evaluate risk modal flow', err);
+        }
         break; // success
       } catch (err: any) {
         attempt += 1;
@@ -224,8 +310,27 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
       const transcription: SpeechToTextResult = await processVoiceToText(audioBlob);
 
       if (transcription.transcript) {
-        // Set the transcribed text as the message
+        // Set the transcribed text as the message and focus the input so user can send or edit
         setNewMessage(transcription.transcript);
+        // Focus and move caret to end (if input supports ref forwarding)
+        try {
+          const el = inputRef?.current as HTMLInputElement | null;
+          if (el) {
+            el.focus();
+            const len = el.value?.length || 0;
+            el.setSelectionRange(len, len);
+          } else {
+            // fallback: try to focus by querySelector
+            const fallback = document.querySelector('input[placeholder="Message Milo..."]') as HTMLInputElement | null;
+            if (fallback) {
+              fallback.focus();
+              const len = fallback.value?.length || 0;
+              fallback.setSelectionRange(len, len);
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to focus input after transcription', err);
+        }
         
         toast({
           title: "✅ Voice processed",
@@ -258,8 +363,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
    * INTEGRATION POINT: Replace mockTranscription with actual Google Cloud API call
    * 
    * To integrate with Google Cloud:
-   * 1. Set up a Lovable Cloud edge function to handle the API call
-   * 2. Pass the audio data to the edge function
+   * 
+   * 1. Pass the audio data to the edge function
    * 3. The edge function calls Google Cloud Speech-to-Text API
    * 4. Return the transcription result
    * 
@@ -313,6 +418,18 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
 
   return (
     <div className="flex flex-col h-full bg-white/10 backdrop-blur-sm">
+      {/* Alert confirmation modal (renders when server signals immediate risk) */}
+      <AlertConfirmationModal
+        open={modalOpen}
+        onClose={() => {
+          setModalOpen(false);
+          setPendingAlert(null);
+        }}
+        onConfirm={handleConfirmAlert}
+        contacts={pendingAlert?.contacts || []}
+        isDemo={pendingAlert?.demo ?? true}
+        message={pendingAlert?.message || ''}
+      />
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((message) => (
@@ -395,6 +512,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
           <Input
             placeholder="Message Milo..."
             value={newMessage}
+            ref={inputRef}
             onChange={(e) => setNewMessage(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
             className="flex-1 bg-white border-cream/30 text-cream-foreground placeholder:text-cream-foreground/50"

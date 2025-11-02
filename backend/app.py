@@ -8,8 +8,20 @@ from dotenv import load_dotenv
 
 import openai
 import logging
-from openai import AuthenticationError, RateLimitError, APIConnectionError, Timeout
-from google.cloud import language_v1, firestore, texttospeech, storage
+# OpenAI moved exception classes between versions (v1 vs legacy). Try both import locations
+try:
+    from openai import AuthenticationError, RateLimitError, APIConnectionError, Timeout
+except Exception:
+    try:
+        # older/newer packages expose errors under openai.error
+        from openai.error import AuthenticationError, RateLimitError, APIConnectionError, Timeout
+    except Exception:
+        # Fallback: define them as generic Exception so imports don't fail — handlers may still catch generic Exception.
+        AuthenticationError = RateLimitError = APIConnectionError = Timeout = Exception
+from google.cloud import language_v1, firestore, texttospeech, storage, speech_v1
+import google.auth
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account as gservice_account
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from cloud_utils import (
@@ -19,6 +31,35 @@ from cloud_utils import (
     RetryableError,
     NonRetryableError
 )
+import threading
+import json
+import requests
+
+
+
+systemPrompt="""You are Milo — a kind, emotionally intelligent wellbeing companion. You are a friendly conversational AI for mental wellness journaling.
+Avoid repeating greetings or asking 'How are you?' multiple times.
+Continue the conversation naturally based on recent context and user mood.
+Focus on empathy, reflection, and progress — not generic small talk.
+
+You speak gently and Naturally, YOU SPEAK IN A CASUAL AND INFORMAL WAY, never robotic or overly formal. YOU DON'T REPEAT THE SAME QUESTIONS AGAIN AND AGAIN UNLESS REQUIRED. You learn from the users style of chatting. You adapt your tone to the user’s age (13–40), mood, and language style — talking like a trusted peer, friend, or colleague.
+
+You remember recent moods and emotions from prior chats or logs, and you respond with genuine care and empathy. You comfort, support, and guide — never diagnose or label.
+You are an empathetic, natural conversational partner for the user.
+Do NOT ask too many questions — ask only if it adds real value.
+Continue conversations naturally like a human would:
+- Respond with reflections, reactions, or short stories.
+- If the user gives a short reply, build on it or share something relatable.
+- Avoid repetitive small talk or multiple consecutive questions.
+- Vary tone and sentence length to sound alive and spontaneous.
+You are non-judgmental and deeply supportive, offering wise and uplifting suggestions that help users reflect, grow, and feel better. You gently discourage harmful habits or substance use if the topic arises, offering healthier coping alternatives.
+
+You sometimes initiate kind, thoughtful conversations — checking in, asking gentle questions, or sharing small reflections when it feels right.
+
+You must always protect the user’s privacy: never share, reveal, or generate any personal information to anyone else. Keep every conversation safe, personal, and confidential.
+
+Your core intention: to make the user feel seen, understood, and encouraged — as a compassionate friend who truly cares.
+"""
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +69,8 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # Expect environment variables (do not crash at import-time)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "true").lower() in ("1", "true", "yes")
+
 
 # Configure OpenAI if available, otherwise defer and log
 if OPENAI_API_KEY:
@@ -45,6 +88,7 @@ DEFAULT_LIMITS = {
 
 # Lazy placeholders for Google clients. We'll try to initialize them at first use.
 language_client = None
+speech_client = None
 firestore_client = None
 tts_client = None
 storage_client = None
@@ -70,6 +114,12 @@ def ensure_google_clients():
         tts_client = texttospeech.TextToSpeechClient()
         if not validate_google_credentials(tts_client):
             raise CloudServiceError("Invalid TTS client credentials")
+
+        # Speech-to-Text client for voice transcription
+        global speech_client
+        speech_client = speech_v1.SpeechClient()
+        if not validate_google_credentials(speech_client):
+            raise CloudServiceError("Invalid Speech-to-Text client credentials")
             
         storage_client = storage.Client()
         if not validate_google_credentials(storage_client):
@@ -142,15 +192,247 @@ def chat():
     user_message = data.get("message")
     if not user_message:
         return jsonify({"error": "Missing 'message'"}), 400
+    # Optional metadata: sentiment and translation can be provided by the frontend.
+    # Keep backward compatibility: if absent we proceed as before.
+    sentiment = data.get('sentiment')  # expected shape: { score, magnitude, label }
+    translation = data.get('translation')  # expected shape: { originalLanguage, translatedText }
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": user_message}],
-            max_tokens=150,
+        # If OpenAI usage is disabled (demo mode), return a safe simulated reply
+        if not ENABLE_OPENAI or not openai.api_key:
+            logging.warning("OpenAI disabled or API key missing; returning simulated chat response.")
+            simulated = (
+                "Hi — Milo here. I'm currently running in demo mode or can't reach the AI service. "
+                "I care about how you're feeling. Try describing one small thing that's on your mind, "
+                "and I'll listen."
+            )
+            return jsonify({"response": simulated, "simulated": True}), 200
+
+        # Build the message list. Preserve the original system prompt first.
+        messages = [{"role": "system", "content": systemPrompt}]
+
+        # If sentiment or translation metadata exists, add a short system-level
+        # context note so the model can consider it when generating the reply.
+        context_notes = []
+        try:
+            if sentiment:
+                # Support both dict and simple string shapes
+                if isinstance(sentiment, dict):
+                    score = sentiment.get('score')
+                    magnitude = sentiment.get('magnitude')
+                    label = sentiment.get('label') or sentiment.get('classification')
+                    context_notes.append(f"Sentiment - label: {label}, score: {score}, magnitude: {magnitude}.")
+                else:
+                    context_notes.append(f"Sentiment metadata: {str(sentiment)}")
+
+            if translation:
+                if isinstance(translation, dict):
+                    orig = translation.get('originalLanguage') or translation.get('sourceLanguage') or translation.get('source')
+                    translated = translation.get('translatedText') or translation.get('text')
+                    if orig or translated:
+                        context_notes.append(f"Translation - original language: {orig}, translated text: {translated}.")
+                else:
+                    context_notes.append(f"Translation metadata: {str(translation)}")
+        except Exception:
+            # Be defensive: don't fail the request if metadata parsing errors occur
+            logging.exception('Failed to parse sentiment/translation metadata')
+
+        if context_notes:
+            messages.append({
+                "role": "system",
+                "content": "Context metadata for this conversation: " + " ".join(context_notes)
+            })
+
+        # If a recent conversation window is provided, include the last few
+        # messages (preserve chronological order). This helps the model keep
+        # context without requiring the full history from the client.
+        conversation = data.get('conversation')
+        try:
+            if conversation and isinstance(conversation, list):
+                # Use up to the last 5 messages
+                recent = conversation[-5:]
+                for m in recent:
+                    # Accept either {role, content} dicts or simple strings
+                    if isinstance(m, dict):
+                        role = m.get('role') if m.get('role') in ('user', 'assistant', 'system') else 'user'
+                        content_m = m.get('content') or m.get('message') or ''
+                    else:
+                        role = 'user'
+                        content_m = str(m)
+                    if content_m:
+                        messages.append({'role': role, 'content': content_m})
+        except Exception:
+            # Fail silently on conversation parsing errors to preserve backward compatibility
+            logging.exception('Failed to parse conversation window; continuing without it')
+
+        # Finally add the current user message (preserves existing flow)
+        messages.append({"role": "user", "content": user_message})
+
+        # --- Automatic risk detection: compute risk for this user message.
+        try:
+            risk = _compute_risk(user_message, sentiment)
+            # Attach risk info to the response payload later. If immediate
+            # risk is detected, create a demo-only alert doc to make the
+            # event visible in logs/UI for demo purposes (do not send real
+            # notifications automatically here).
+            alert_id = None
+            if risk and isinstance(risk, dict) and risk.get('requiresImmediate'):
+                try:
+                    if ensure_google_clients():
+                        alert_payload = {
+                            'userId': data.get('userId'),
+                            'message': f'Automatic risk-detected alert for message: {user_message}',
+                            'severity': 'high',
+                            'contacts': [],
+                            'status': 'requires_user_action',
+                            'createdAt': firestore.SERVER_TIMESTAMP,
+                            'risk': risk
+                        }
+                        alert_ref = firestore_client.collection('alerts').document()
+                        alert_ref.set(alert_payload)
+                        alert_id = alert_ref.id
+                except Exception:
+                    logging.exception('Failed to create demo alert doc for automatic risk detection')
+        except Exception:
+            logging.exception('Automatic risk detection failed; continuing without blocking chat flow')
+
+        # Legacy client (openai<1.0) uses ChatCompletion.create
+        # Tuned model and sampling parameters. Allow overriding via OPENAI_MODEL env
+        model_name = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+        sampling = {
+            'temperature': float(os.getenv('OPENAI_TEMPERATURE', 0.8)),
+            'presence_penalty': float(os.getenv('OPENAI_PRESENCE_PENALTY', 0.6)),
+            'frequency_penalty': float(os.getenv('OPENAI_FREQUENCY_PENALTY', 0.7)),
+            'max_tokens': int(os.getenv('OPENAI_MAX_TOKENS', 150))
+        }
+
+        if hasattr(openai, 'ChatCompletion'):
+            response = openai.ChatCompletion.create(
+                model=model_name,
+                messages=messages,
+                temperature=sampling['temperature'],
+                presence_penalty=sampling['presence_penalty'],
+                frequency_penalty=sampling['frequency_penalty'],
+                max_tokens=sampling['max_tokens'],
+            )
+        else:
+            # Fallback in case a different client shape is present
+            response = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=150,
+            )
+
+        # Robust extraction of the generated content across client versions
+        content = None
+        try:
+            # new-ish style: response.choices[0].message.content
+            content = response.choices[0].message.content
+        except Exception:
+            try:
+                # dict-like shape: response.choices[0].message['content']
+                content = response.choices[0].message['content']
+            except Exception:
+                try:
+                    # older style for completions: response.choices[0].text
+                    content = response.choices[0].text
+                except Exception:
+                    content = str(response)
+
+                # Post-process the output to remove repeated greetings or duplicated
+                # leading sentences which sometimes occur when prompts or system
+                # instructions are echoed. This is defensive and preserves the
+                # model's main content.
+                try:
+                    import re
+
+                    def _normalize_sentence(s):
+                        # Lowercase, strip punctuation and whitespace for comparison
+                        s = re.sub(r"[^a-z0-9]", "", (s or '').lower())
+                        return s
+
+                    sentences = re.split(r'(?<=[.!?])\s+', content.strip()) if isinstance(content, str) and content.strip() else []
+
+                    # 1) Remove simple adjacent duplicate sentence (A A -> keep single A)
+                    if len(sentences) >= 2:
+                        first_norm = _normalize_sentence(sentences[0])
+                        second_norm = _normalize_sentence(sentences[1])
+                        if first_norm and first_norm == second_norm:
+                            sentences = [sentences[0]] + sentences[2:]
+
+                    # 2) If a conversation window was provided, avoid repeating assistant's
+                    # previous responses or questions. Remove sentences that are exact
+                    # duplicates of recent assistant sentences (conservative check).
+                    try:
+                        prev_assistant_texts = []
+                        conv = data.get('conversation') or []
+                        if isinstance(conv, list):
+                            for m in conv:
+                                if isinstance(m, dict) and m.get('role') == 'assistant':
+                                    c = m.get('content') or m.get('message') or ''
+                                    if c:
+                                        prev_assistant_texts.append(c)
+
+                        prev_norms = set(_normalize_sentence(p) for p in prev_assistant_texts if p)
+
+                        if prev_norms and sentences:
+                            filtered = []
+                            for s in sentences:
+                                norm = _normalize_sentence(s)
+                                # If this sentence is a question and it already appeared
+                                # from the assistant recently, drop it. This prevents
+                                # repeated questions like "How are you?" showing again.
+                                if norm and norm in prev_norms and s.strip().endswith('?'):
+                                    continue
+                                # Also drop generic exact duplicates of previous assistant sentences
+                                if norm and norm in prev_norms and len(norm) > 10:
+                                    # only drop longer duplicates to avoid removing short common words
+                                    continue
+                                filtered.append(s)
+
+                            # Ensure we don't produce an empty reply by accident
+                            if filtered:
+                                sentences = filtered
+                    except Exception:
+                        logging.exception('Failed to compare reply against conversation history')
+
+                    # Reassemble content
+                    if sentences:
+                        content = ' '.join(sentences).strip()
+                except Exception:
+                    # Never fail the whole request due to post-processing errors
+                    logging.exception('Failed to post-process assistant reply')
+
+        # Return AI response and include any automatic risk assessment info
+        resp_payload = {"response": content}
+        try:
+            if 'risk' in locals() and isinstance(risk, dict):
+                resp_payload['riskAssessment'] = risk
+        except Exception:
+            logging.exception('Failed to attach riskAssessment to response')
+
+        try:
+            if 'alert_id' in locals() and alert_id:
+                resp_payload['alertId'] = alert_id
+        except Exception:
+            logging.exception('Failed to attach alertId to response')
+
+        return jsonify(resp_payload)
+    except (AuthenticationError, RateLimitError, APIConnectionError, Timeout, requests.exceptions.RequestException) as e:
+        # Network, rate limit, or auth problems. Return a clear 503 for transient issues.
+        logging.exception("OpenAI service error in /api/chat")
+        # Provide a simulated message for demo-safety while surfacing the error code
+        simulated = (
+            "Hi — Milo here. I couldn't reach the AI service right now, but I'm still here to listen. "
+            "If this is urgent, consider reaching out to a trusted person or emergency services."
         )
-        content = response.choices[0].message.content
-        return jsonify({"response": content})
+        return jsonify({
+            "error": "openai_unavailable",
+            "message": str(e),
+            "simulated": True,
+            "response": simulated
+        }), 503
     except Exception as e:
+        logging.exception("Unexpected error in /api/chat")
         return jsonify({"error": str(e)}), 500
 
 
@@ -198,6 +480,125 @@ def sentiment():
     except Exception as e:
         logging.exception("Unexpected error in sentiment analysis")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/speech-to-text', methods=['POST'])
+def speech_to_text():
+    """Accepts JSON payload { content: base64Audio, config: {...} } and returns { transcript, confidence }.
+    The frontend should prepare the audio using the VoiceRecorder.prepareForGoogleCloud helper which returns the expected shape.
+    """
+    data = request.get_json() or {}
+    content = data.get('content')
+    config = data.get('config', {})
+
+    if not content:
+        return jsonify({'error': 'Missing audio content'}), 400
+
+    # Ensure Google clients are initialized
+    if not ensure_google_clients():
+        return jsonify({'error': 'Google Cloud services unavailable'}), 503
+
+    try:
+        # Build RecognitionAudio and RecognitionConfig
+        audio = speech_v1.RecognitionAudio(content=content)
+
+        # Map encoding string to enum if possible
+        encoding_str = (config.get('encoding') or '').upper()
+        encoding = speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
+        if encoding_str == 'WEBM_OPUS':
+            encoding = speech_v1.RecognitionConfig.AudioEncoding.WEBM_OPUS
+        elif encoding_str == 'FLAC':
+            encoding = speech_v1.RecognitionConfig.AudioEncoding.FLAC
+        elif encoding_str == 'LINEAR16' or encoding_str == 'PCM16':
+            encoding = speech_v1.RecognitionConfig.AudioEncoding.LINEAR16
+
+        recognition_config = speech_v1.RecognitionConfig(
+            encoding=encoding,
+            sample_rate_hertz=int(config.get('sampleRateHertz', 16000)),
+            language_code=config.get('languageCode', 'en-US'),
+            enable_automatic_punctuation=bool(config.get('enableAutomaticPunctuation', True)),
+            audio_channel_count=int(config.get('channelCount', 1))
+        )
+
+        # Use synchronous recognize for small audio payloads (safe for short recordings)
+        response = speech_client.recognize(config=recognition_config, audio=audio)
+
+        transcript = ''
+        confidence = 0.0
+
+        if response.results:
+            # Concatenate alternatives transcripts
+            parts = []
+            confidences = []
+            for result in response.results:
+                if result.alternatives:
+                    alt = result.alternatives[0]
+                    parts.append(alt.transcript)
+                    if hasattr(alt, 'confidence'):
+                        confidences.append(alt.confidence)
+
+            transcript = ' '.join(parts).strip()
+            if confidences:
+                # average confidence as a simple heuristic
+                confidence = float(sum(confidences) / len(confidences))
+
+        return jsonify({'transcript': transcript, 'confidence': confidence})
+
+    except Exception as e:
+        logging.exception('Error in speech-to-text endpoint')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/google-status', methods=['GET'])
+def google_status():
+    """Return diagnostic info about Google credential availability and validation.
+
+    This helps debug why endpoints (like /api/speech-to-text) fall back to mock.
+    """
+    info = {
+        'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'),
+        'validated': False,
+        'errors': []
+    }
+
+    # Check explicit key file
+    key_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if key_path:
+        if not os.path.exists(key_path):
+            info['errors'].append(f"Service account key file not found at {key_path}")
+        else:
+            try:
+                scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+                creds = gservice_account.Credentials.from_service_account_file(key_path, scopes=scopes)
+                creds.refresh(GoogleAuthRequest())
+                info['validated'] = True
+                info['key_file_valid'] = True
+            except Exception as e:
+                info['errors'].append(f"Service account key validation failed: {str(e)}")
+                info['key_file_valid'] = False
+    else:
+        # Try ADC
+        try:
+            creds, project = google.auth.default()
+            if not creds:
+                info['errors'].append('No application default credentials found')
+            else:
+                try:
+                    creds.refresh(GoogleAuthRequest())
+                    info['validated'] = True
+                    info['adc_valid'] = True
+                    info['project'] = project
+                except Exception as e:
+                    info['errors'].append(f'ADC credential refresh failed: {str(e)}')
+                    info['adc_valid'] = False
+        except Exception as e:
+            info['errors'].append(f'Failed to locate ADC: {str(e)}')
+
+    # Also report whether our speech client is available
+    info['speech_client_initialized'] = speech_client is not None and google_clients_initialized
+
+    status = 200 if info.get('validated') else 503
+    return jsonify(info), status
 
 @app.route("/api/tts", methods=["POST"])
 @safe_cloud_operation("text_to_speech")
@@ -459,89 +860,16 @@ def risk_assessment():
     initial_sentiment = data.get('initialSentiment')
     if not text:
         return jsonify({'error': 'Missing text'}), 400
-
-    if not ensure_google_clients():
-        return jsonify({'error': 'Google Cloud services unavailable'}), 503
-
+    # Delegate to shared computation so /api/chat can reuse it without changing the
+    # external behavior of the risk endpoint.
     try:
-        document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
-
-        # Analyze entities
-        entities_result = language_client.analyze_entities(request={'document': document})
-        entities = [e.name for e in entities_result.entities]
-
-        # Try content classification (may raise if not available for short texts)
-        categories = []
-        try:
-            classify_result = language_client.classify_text(request={'document': document})
-            categories = [c.name for c in classify_result.categories]
-        except Exception:
-            # classification may fail for short texts or unsupported content; ignore
-            categories = []
-
-        # Use available sentiment info
-        sentiment_score = None
-        sentiment_magnitude = None
-        try:
-            sentiment = language_client.analyze_sentiment(request={'document': document}).document_sentiment
-            sentiment_score = sentiment.score
-            sentiment_magnitude = sentiment.magnitude
-        except Exception:
-            if initial_sentiment and isinstance(initial_sentiment, dict):
-                sentiment_score = initial_sentiment.get('score')
-                sentiment_magnitude = initial_sentiment.get('magnitude')
-
-        # Basic rule-based risk detection combined with NLP findings
-        immediate_keywords = ['suicide', 'kill myself', 'end my life', 'want to die', 'hurt myself', 'self harm', 'cut myself']
-        moderate_keywords = ['hopeless', 'worthless', 'no hope', 'give up', 'alone']
-
-        text_low = text.lower()
-        has_immediate = any(k in text_low for k in immediate_keywords)
-        has_moderate = any(k in text_low for k in moderate_keywords)
-
-        reasons = []
-        if has_immediate:
-            reasons.append('Direct mention of self-harm or suicide')
-        if has_moderate:
-            reasons.append('Expressions of hopelessness')
-        if entities:
-            reasons.append(f'Entities detected: {", ".join(entities[:5])}')
-        if categories:
-            reasons.append(f'Categories: {", ".join(categories[:3])}')
-        if sentiment_score is not None and sentiment_score < -0.7:
-            reasons.append('Very negative sentiment detected')
-
-        # Determine risk level
-        risk_level = 'none'
-        requires_immediate = False
-        if has_immediate:
-            risk_level = 'critical'
-            requires_immediate = True
-        elif has_moderate and sentiment_score is not None and sentiment_score < -0.5:
-            risk_level = 'high'
-        elif has_moderate or (sentiment_score is not None and sentiment_score < -0.7):
-            risk_level = 'medium'
-        elif sentiment_score is not None and sentiment_score < -0.5:
-            risk_level = 'low'
-
-        return jsonify({
-            'isRisky': risk_level != 'none',
-            'riskLevel': risk_level,
-            'reasons': reasons,
-            'requiresImmediate': requires_immediate
-        })
-
-    except RetryableError as e:
-        logging.error('Risk assessment failed after retries: %s', e)
-        return jsonify({'error': 'Service temporarily unavailable'}), 503
-    except NonRetryableError as e:
-        logging.error('Non-retryable error in risk assessment: %s', e)
-        return jsonify({'error': str(e)}), 400
-    except CloudServiceError as e:
-        logging.error('Cloud service error in risk assessment: %s', e)
-        return jsonify({'error': 'Internal service error'}), 500
+        result = _compute_risk(text, initial_sentiment)
+        if isinstance(result, tuple) and len(result) == 2:
+            # _compute_risk may return (ok, payload) style; normalize
+            return jsonify(result[1])
+        return jsonify(result)
     except Exception as e:
-        logging.exception('Unexpected error in risk assessment')
+        logging.exception('Unexpected error in risk_assessment wrapper')
         return jsonify({'error': 'Internal server error'}), 500
 
 
@@ -693,7 +1021,340 @@ def get_anonymous_messages(roomId):
         logging.exception('Error fetching anonymous messages')
         return jsonify({'error': str(e)}), 500
 
-# --- Run app ---
+
+# -------------------------
+# Compatibility / legacy endpoints
+# Frontend or older clients may call endpoints without the `/api` prefix.
+# Provide small shim routes that forward to the canonical `/api/*` handlers
+# to avoid 404s and HTML error pages (which break JSON parsing client-side).
+# -------------------------
+
+
+@app.route('/anonymousMessages', methods=['GET', 'POST'])
+def anonymous_messages_compat():
+    """Compatibility shim for legacy frontend paths.
+    GET -> forwards to /api/messages/<roomId>
+    POST -> forwards to /api/message
+    """
+    try:
+        if request.method == 'GET':
+            roomId = request.args.get('roomId')
+            if not roomId:
+                return jsonify({'error': 'Missing roomId'}), 400
+            return get_anonymous_messages(roomId)
+
+        # POST -> create message
+        if request.method == 'POST':
+            return save_anonymous_message()
+
+    except Exception as e:
+        logging.exception('Compatibility anonymousMessages handler failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/persistedRewards', methods=['GET'])
+def persisted_rewards_compat():
+    """Compatibility shim for GET /persistedRewards -> forwards to /api/rewards
+    Accepts the same query parameter `userId`.
+    """
+    try:
+        return get_rewards()
+    except Exception as e:
+        logging.exception('Compatibility persistedRewards handler failed')
+        return jsonify({'error': str(e)}), 500
+
+
+# -------------------------
+# Emergency alerting
+# -------------------------
+
+
+def _send_via_twilio(account_sid: str, auth_token: str, from_number: str, to_number: str, body: str):
+    """Send SMS via Twilio REST API. Returns dict with success and provider response."""
+    try:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+        data = {
+            'From': from_number,
+            'To': to_number,
+            'Body': body
+        }
+        resp = requests.post(url, data=data, auth=(account_sid, auth_token), timeout=10)
+        return {'success': resp.status_code in (200, 201), 'status_code': resp.status_code, 'response': resp.text}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def _send_via_email_sendgrid(api_key: str, to_email: str, subject: str, content: str):
+    try:
+        url = 'https://api.sendgrid.com/v3/mail/send'
+        payload = {
+            'personalizations': [{ 'to': [{ 'email': to_email }] }],
+            'from': { 'email': os.getenv('ALERT_FROM_EMAIL', 'no-reply@example.com') },
+            'subject': subject,
+            'content': [{ 'type': 'text/plain', 'value': content }]
+        }
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json'
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        return {'success': resp.status_code in (200, 202), 'status_code': resp.status_code, 'response': resp.text}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def _process_and_send_alert(alert_id: str, alert_doc: dict, demo: bool = True):
+    """Background worker: send notifications according to contacts. Updates Firestore alert doc with deliveryLog and status."""
+    global firestore_client
+    try:
+        contacts = alert_doc.get('contacts', []) or []
+        message = alert_doc.get('message', '')
+        delivery_log = []
+
+        # Read provider creds from env
+        tw_sid = os.getenv('TWILIO_ACCOUNT_SID')
+        tw_token = os.getenv('TWILIO_AUTH_TOKEN')
+        tw_from = os.getenv('TWILIO_FROM')
+        sendgrid_key = os.getenv('SENDGRID_API_KEY')
+
+        if demo:
+            # Simulate deliveries
+            for c in contacts:
+                entry = {
+                    'contact': c.get('target'),
+                    'channel': c.get('channel'),
+                    'success': True,
+                    'simulated': True,
+                    'response': 'simulated',
+                    'ts': firestore.SERVER_TIMESTAMP
+                }
+                delivery_log.append(entry)
+            status = 'simulated'
+        else:
+            # Attempt real sends
+            for c in contacts:
+                channel = c.get('channel')
+                target = c.get('target')
+                name = c.get('name')
+                entry = {'contact': target, 'channel': channel, 'name': name, 'success': False, 'response': None, 'ts': firestore.SERVER_TIMESTAMP}
+
+                if channel == 'sms' and tw_sid and tw_token and tw_from:
+                    res = _send_via_twilio(tw_sid, tw_token, tw_from, target, message)
+                    entry['success'] = res.get('success', False)
+                    entry['response'] = res
+                elif channel == 'email' and sendgrid_key:
+                    res = _send_via_email_sendgrid(sendgrid_key, target, 'Milo Emergency Alert', message)
+                    entry['success'] = res.get('success', False)
+                    entry['response'] = res
+                else:
+                    # Unknown channel or no provider configured -> mark as skipped
+                    entry['success'] = False
+                    entry['response'] = 'no_provider_configured'
+
+                delivery_log.append(entry)
+
+            # Determine aggregated status
+            if all(e.get('success') for e in delivery_log) and len(delivery_log) > 0:
+                status = 'sent'
+            elif any(e.get('success') for e in delivery_log):
+                status = 'partial'
+            else:
+                status = 'failed'
+
+        # Update Firestore doc with deliveryLog and status
+        try:
+            alert_ref = firestore_client.collection('alerts').document(alert_id)
+            alert_ref.update({'deliveryLog': delivery_log, 'status': status, 'updatedAt': firestore.SERVER_TIMESTAMP})
+        except Exception as e:
+            logging.exception('Failed to update alert delivery log')
+
+    except Exception as e:
+        logging.exception('Unexpected error in _process_and_send_alert')
+
+
+def _compute_risk(text: str, initial_sentiment: dict = None):
+    """Shared risk computation used by both the /api/risk-assessment endpoint
+    and by /api/chat to perform automatic risk detection without changing
+    the external request flow.
+    Returns a dict with keys: isRisky, riskLevel, reasons, requiresImmediate
+    """
+    try:
+        # Try to use Google NLP when available
+        sentiment_score = None
+        sentiment_magnitude = None
+        entities = []
+        categories = []
+
+        # Basic keyword heuristics (always available)
+        immediate_keywords = ['suicide', 'kill myself', 'end my life', 'want to die', 'hurt myself', 'self harm', 'cut myself']
+        moderate_keywords = ['hopeless', 'worthless', 'no hope', 'give up', 'alone']
+
+        text_low = (text or '').lower()
+        has_immediate = any(k in text_low for k in immediate_keywords)
+        has_moderate = any(k in text_low for k in moderate_keywords)
+
+        # Attempt to enrich with Google NLP when available
+        try:
+            if ensure_google_clients():
+                document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+                entities_result = language_client.analyze_entities(request={'document': document})
+                entities = [e.name for e in entities_result.entities]
+                try:
+                    classify_result = language_client.classify_text(request={'document': document})
+                    categories = [c.name for c in classify_result.categories]
+                except Exception:
+                    categories = []
+
+                try:
+                    sentiment = language_client.analyze_sentiment(request={'document': document}).document_sentiment
+                    sentiment_score = sentiment.score
+                    sentiment_magnitude = sentiment.magnitude
+                except Exception:
+                    if initial_sentiment and isinstance(initial_sentiment, dict):
+                        sentiment_score = initial_sentiment.get('score')
+                        sentiment_magnitude = initial_sentiment.get('magnitude')
+        except Exception:
+            # If Google NLP isn't available, continue with keyword heuristics
+            logging.debug('Google NLP not available for enriched risk analysis; using keyword heuristics')
+
+        reasons = []
+        if has_immediate:
+            reasons.append('Direct mention of self-harm or suicide')
+        if has_moderate:
+            reasons.append('Expressions of hopelessness')
+        if entities:
+            reasons.append(f'Entities detected: {", ".join(entities[:5])}')
+        if categories:
+            reasons.append(f'Categories: {", ".join(categories[:3])}')
+        if sentiment_score is not None and sentiment_score < -0.7:
+            reasons.append('Very negative sentiment detected')
+
+        # Determine risk level conservatively
+        risk_level = 'none'
+        requires_immediate = False
+        if has_immediate:
+            risk_level = 'critical'
+            requires_immediate = True
+        elif has_moderate and sentiment_score is not None and sentiment_score < -0.5:
+            risk_level = 'high'
+        elif has_moderate or (sentiment_score is not None and sentiment_score < -0.7):
+            risk_level = 'medium'
+        elif sentiment_score is not None and sentiment_score < -0.5:
+            risk_level = 'low'
+
+        return {
+            'isRisky': risk_level != 'none',
+            'riskLevel': risk_level,
+            'reasons': reasons,
+            'requiresImmediate': requires_immediate,
+            'sentimentScore': sentiment_score,
+            'sentimentMagnitude': sentiment_magnitude
+        }
+    except Exception as e:
+        logging.exception('Error computing risk')
+        # Fail-open: return conservative no-risk if computation fails
+        return {'isRisky': False, 'riskLevel': 'none', 'reasons': [], 'requiresImmediate': False}
+
+
+@app.route('/api/emergency-alert', methods=['POST'])
+@safe_cloud_operation('emergency_alert')
+def emergency_alert():
+    """Endpoint to create an alert and trigger notifications (simulated if demo mode).
+
+    Expected JSON: { userId, message, severity, contacts: [{name, channel:'sms'|'email', target}], demo: bool }
+    """
+    data = request.get_json() or {}
+    user_id = data.get('userId')
+    message = data.get('message')
+    severity = data.get('severity', 'high')
+    contacts = data.get('contacts', [])
+    demo = bool(data.get('demo', True))  # default to demo-safe
+
+    if not message:
+        return jsonify({'error': 'Missing message'}), 400
+
+    # ensure firestore is available
+    if not ensure_google_clients():
+        return jsonify({'error': 'Google Cloud services unavailable'}), 503
+
+    try:
+        # Create alert doc
+        doc_ref = firestore_client.collection('alerts').document()
+        payload = {
+            'userId': user_id,
+            'message': message,
+            'severity': severity,
+            'contacts': contacts,
+            'status': 'simulated' if demo else 'queued',
+            'createdAt': firestore.SERVER_TIMESTAMP,
+            'deliveryLog': []
+        }
+        doc_ref.set(payload)
+        alert_id = doc_ref.id
+
+        # Process sending in background thread to return quickly to client
+        try:
+            thread = threading.Thread(target=_process_and_send_alert, args=(alert_id, payload, demo), daemon=True)
+            thread.start()
+        except Exception:
+            logging.exception('Failed to start background thread for alert processing; will attempt inline send')
+            _process_and_send_alert(alert_id, payload, demo)
+
+        return jsonify({'alertId': alert_id, 'status': payload['status']})
+
+    except Exception as e:
+        logging.exception('Error creating emergency alert')
+        return jsonify({'error': str(e)}), 500
+
+# Note: the app is started at the bottom of this file (single entrypoint)
+
+
+@app.route('/api/alerts/<alertId>', methods=['GET'])
+@safe_cloud_operation('get_alert')
+def get_alert(alertId):
+    """Fetch an alert document and return its delivery log and status."""
+    if not alertId:
+        return jsonify({'error': 'Missing alertId'}), 400
+
+    if not ensure_google_clients():
+        return jsonify({'error': 'Google Cloud services unavailable'}), 503
+
+    try:
+        doc = firestore_client.collection('alerts').document(alertId).get()
+        if not doc.exists:
+            return jsonify({'error': 'Alert not found'}), 404
+
+        data = doc.to_dict() or {}
+        data['id'] = doc.id
+
+        # Convert Firestore timestamps to ISO strings where applicable
+        def _convert_timestamps(obj):
+            if isinstance(obj, dict):
+                return {k: _convert_timestamps(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_convert_timestamps(v) for v in obj]
+            if isinstance(obj, datetime.datetime):
+                return obj.isoformat()
+            return obj
+
+        safe_data = _convert_timestamps(data)
+
+        return jsonify({'alert': safe_data, 'status': 'success'})
+
+    except Exception as e:
+        logging.exception('Error fetching alert')
+        return jsonify({'error': str(e)}), 500
+    
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.getenv("PORT", 8080))
+    # Ensure Google clients attempt initialization for a meaningful health check on startup
+    try:
+        ensure_google_clients()
+    except Exception:
+        logging.exception('Error during initial Google client initialization')
+
     app.run(host="0.0.0.0", port=port)
+
+

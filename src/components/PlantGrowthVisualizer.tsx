@@ -28,7 +28,13 @@ export const PlantGrowthVisualizer: React.FC<PlantGrowthVisualizerProps> = ({
     : 100;
 
   return (
-    <Card className="overflow-hidden" style={{ background: 'linear-gradient(135deg, hsl(var(--reward-violet) / 0.1), hsl(var(--reward-blue) / 0.1))' }}>
+    <Card
+  className="overflow-hidden"
+  style={{
+    background: 'linear-gradient(135deg, hsl(40, 40%, 92%), hsl(45, 30%, 98%))'
+  }}
+>
+
       <CardContent className="p-4 space-y-3">
         <div className="text-center space-y-1">
           <div className="text-6xl animate-bounce">{currentStage.emoji}</div>

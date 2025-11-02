@@ -27,6 +27,40 @@ export function saveUserData<T>(userId: string, key: string, value: T) {
   try {
     const k = makeKey(userId, key);
     localStorage.setItem(k, JSON.stringify(value));
+    // background sync to Firestore (best-effort)
+    try {
+      // dynamic import to avoid forcing firebase on users who don't configure it
+      import('./firebase').then(async (mod) => {
+        const { ensureSignedIn, getDb } = mod;
+        try {
+          const user = await ensureSignedIn();
+          const db = getDb();
+          if (!user || !db) return;
+          const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
+          const docId = `${user.uid}_${key}`;
+          const ref = doc(db, 'milo_user_data', docId);
+          try {
+            await setDoc(ref, { userId: user.uid, key, value, updatedAt: serverTimestamp() }, { merge: true });
+          } catch (err: any) {
+            // Defensive: ignore client-side stream/channel 400s (already-closed session) and other transient errors.
+            const msg = err?.message || '';
+            const status = err?.status || err?.code || null;
+            if (status === 400 || /bad request|channel|gsessionid|already closed/i.test(msg)) {
+              console.debug('Firestore setDoc returned 400 or channel error - ignoring for best-effort sync', { key, docId, status, message: msg });
+            } else {
+              // other errors are logged but don't crash the app
+              console.warn('Firestore setDoc failed', { key, docId, err });
+            }
+          }
+        } catch (e) {
+          // ensureSignedIn or getDb may fail; ignore for best-effort
+        }
+      }).catch((e) => {
+        // ignore import-level failures
+      });
+    } catch (e) {
+      // ignore
+    }
   } catch (err) {
     console.warn('Failed to saveUserData', err);
   }
@@ -41,6 +75,41 @@ export function loadUserData<T>(userId: string, key: string): T | null {
   } catch (err) {
     console.warn('Failed to loadUserData', err);
     return null;
+  }
+}
+
+// Try to fetch latest data from Firestore and write to localStorage (best-effort)
+export function syncFromFirestore(userId: string, key: string) {
+  try {
+    import('./firebase').then(async (mod) => {
+      const { ensureSignedIn, getDb } = mod;
+      const user = await ensureSignedIn();
+      const db = getDb();
+      if (!user || !db) return;
+      const { doc, getDoc } = await import('firebase/firestore');
+      const docId = `${user.uid}_${key}`;
+      const ref = doc(db, 'milo_user_data', docId);
+      try {
+        const snap = await getDoc(ref);
+        if (snap && snap.exists()) {
+          const data = snap.data();
+          if (data && 'value' in data) {
+            const k = makeKey(userId, key);
+            try { localStorage.setItem(k, JSON.stringify(data.value)); } catch (e) { /* ignore */ }
+          }
+        }
+      } catch (err: any) {
+        const msg = err?.message || '';
+        const status = err?.status || err?.code || null;
+        if (status === 400 || /bad request|channel|gsessionid|already closed/i.test(msg)) {
+          console.debug('Firestore getDoc returned 400 or channel error - ignoring for best-effort sync', { key, docId, status, message: msg });
+        } else {
+          console.warn('Firestore getDoc failed', { key, docId, err });
+        }
+      }
+    }).catch(() => {});
+  } catch (e) {
+    // ignore
   }
 }
 
@@ -60,6 +129,31 @@ export function clearUserData(userId: string, key: string) {
   try {
     const k = makeKey(userId, key);
     localStorage.removeItem(k);
+    // attempt to remove from Firestore in background (best-effort)
+    try {
+      import('./firebase').then(async (mod) => {
+        const { ensureSignedIn, getDb } = mod;
+        const user = await ensureSignedIn();
+        const db = getDb();
+        if (!user || !db) return;
+        const { doc, deleteDoc } = await import('firebase/firestore');
+        const docId = `${user.uid}_${key}`;
+        const ref = doc(db, 'milo_user_data', docId);
+        try {
+          await deleteDoc(ref);
+        } catch (err: any) {
+          const msg = err?.message || '';
+          const status = err?.status || err?.code || null;
+          if (status === 400 || /bad request|channel|gsessionid|already closed/i.test(msg)) {
+            console.debug('Firestore deleteDoc returned 400 or channel error - ignoring for best-effort sync', { key, docId, status, message: msg });
+          } else {
+            console.warn('Firestore deleteDoc failed', { key, docId, err });
+          }
+        }
+      }).catch(() => {});
+    } catch (e) {
+      // ignore
+    }
   } catch (err) {
     console.warn('clearUserData failed', err);
   }
