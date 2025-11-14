@@ -28,7 +28,7 @@ Backend: Flask API running in Docker, deployed on Google Cloud Run.
 
 AI & Cloud Services:
 
-OpenAI GPT: Powers Milo’s personality and friendly conversation.
+OpenAI GPT: Powers Milo’s personality and friendly conversation.  //Note: Future Integration with Gemma/ accurately trained models specifically for this cause.
 
 Google Cloud NLP: Analyzes moods and sentiment.
 
