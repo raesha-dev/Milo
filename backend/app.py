@@ -1186,7 +1186,7 @@ def _compute_risk(text: str, initial_sentiment: dict = None):
         categories = []
 
         # Basic keyword heuristics (always available)
-        immediate_keywords = ['suicide', 'kill myself', 'end my life', 'want to die', 'hurt myself', 'self harm', 'cut myself']
+        immediate_keywords = ['suicide', 'suicidal','kill myself', 'end my life', 'want to die', 'hurt myself', 'self harm', 'cut myself']
         moderate_keywords = ['hopeless', 'worthless', 'no hope', 'give up', 'alone']
 
         text_low = (text or '').lower()

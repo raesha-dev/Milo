@@ -145,7 +145,9 @@ export const GrowthGarden: React.FC = () => {
 
         // Try to fetch persisted rewards from backend
         try {
-          const res = await fetch('/api/rewards');
+          const userId = getOrCreateUserId();
+          const res = await fetch(`/api/rewards?userId=${encodeURIComponent(userId)}`);
+
           if (res.ok) {
             const payload = await res.json();
             if (Array.isArray(payload.rewards)) {
