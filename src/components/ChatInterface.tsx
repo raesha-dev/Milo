@@ -515,7 +515,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
             ref={inputRef}
             onChange={(e) => setNewMessage(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-            className="flex-1 bg-white border-cream/30 text-cream-foreground placeholder:text-cream-foreground/50"
+            className="flex-1 message-input border border-border placeholder:text-muted-foreground/50"
             disabled={isSending}
           />
           <Button
