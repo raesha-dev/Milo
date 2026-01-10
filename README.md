@@ -24,14 +24,14 @@ How It Works...
 
 Frontend: Built with Vite + React, designed to mimic Instagram DMs.
 
-Backend: Flask API running in Docker, deployed on Google Cloud Run.
+Backend: Flask API running in Docker, deployed on Google Cloud Run for now.  // Note: Future will be shifted to Azure static web apps
 
-AI & Cloud Services:
+AI & Azure Services used in mvp for now //credits required for live demonstration, solution is end to end ready with fallbacks:
 
-OpenAI GPT: Powers Milo’s personality and friendly conversation.  //Note: Future Integration with Gemma/ accurately trained models specifically for this cause.
+Azure OpenAI : Powers Milo’s personality and friendly conversation.  
 
-Google Cloud NLP: Analyzes moods and sentiment.
+Azure NLP: Analyzes moods and sentiment.
 
-Firestore: Stores mood logs anonymously, no personal data saved.
+Azure storage/ blob storage/ cosmos db: Stores mood logs anonymously, no personal data saved.
 
-Google Cloud TTS: Provides a soothing voice for mindfulness exercises.
+Azure TTS: Provides a soothing voice for mindfulness exercises.
