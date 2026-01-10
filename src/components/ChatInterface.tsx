@@ -159,6 +159,64 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
     setNewMessage('');
     setIsSending(true);
 
+
+    // Pre-send: consult server-side sentiment + risk-assessment to catch urgent language
+    // Use Google Cloud NLP via backend (/api/sentiment -> /api/risk-assessment) when available.
+    try {
+      const base = import.meta.env.VITE_BACKEND_API || '';
+      let initialSentiment: any = null;
+      try {
+        const sResp = await fetch(`${base}/api/sentiment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: userMessage.text })
+        });
+        if (sResp.ok) {
+          const sJson = await sResp.json();
+          initialSentiment = { score: sJson.score, magnitude: sJson.magnitude };
+        }
+      } catch (e) {
+        // non-blocking: sentiment endpoint may be unavailable (no ADC); continue
+        console.warn('Sentiment endpoint unavailable, continuing without initial sentiment', e);
+      }
+
+      try {
+        const rResp = await fetch(`${base}/api/risk-assessment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: userMessage.text, initialSentiment })
+        });
+
+        if (rResp.ok) {
+          const rJson = await rResp.json();
+          if (rJson && rJson.requiresImmediate) {
+            // Prepare modal state and surface to user while continuing the chat flow
+            const reasons = Array.isArray(rJson.reasons) ? rJson.reasons.join('; ') : rJson.reasons || '';
+            const alertMsg = reasons
+              ? `Milo detected immediate safety concerns: ${reasons}`
+              : `Milo detected potential immediate risk and recommends contacting your trusted contacts.`;
+
+            const settings = getEmergencySettings();
+            const request = {
+              userId: getOrCreateUserId(),
+              message: `${alertMsg}\n\nUser message: ${userMessage.text}`,
+              severity: 'high' as const,
+              contacts: settings.contacts,
+              demo: settings.demoMode,
+            } as AlertRequest;
+
+            setPendingAlert(request);
+            setModalOpen(true);
+            toast({ title: 'Safety check', description: 'Milo detected potential immediate risk. Tap the alert to review or send.' });
+          }
+        }
+      } catch (e) {
+        console.warn('Risk assessment endpoint failed; proceeding with chat', e);
+      }
+    } catch (e) {
+      console.warn('Pre-send risk check failed unexpectedly', e);
+    }
+
     // retry with exponential backoff for rate limits/network hiccups
     const maxRetries = 3;
     let attempt = 0;
@@ -373,6 +431,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
    *   body: { audioData: base64Audio }
    * });
    */
+  
   const processVoiceToText = async (audioBlob: Blob): Promise<SpeechToTextResult> => {
     // Prepare audio payload for backend speech-to-text endpoint
     try {
@@ -382,25 +441,130 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ messageColor }) =>
           audioSize: googleCloudData.content.length,
           config: googleCloudData.config
         });
+        // Try multipart upload first (preferred): /api/speech-to-text-upload
+        // If the deployed backend doesn't have this route (404) we'll fall back
+        // to the JSON base64 endpoint `/api/speech-to-text`.
+        const base = import.meta.env.VITE_BACKEND_API || '';
 
-        // POST to backend endpoint which will call Google Cloud Speech-to-Text securely
-        const response = await fetch('/api/speech-to-text', {
+        // Helper: try multipart upload
+        const tryMultipart = async (): Promise<Response> => {
+          try {
+            const fd = new FormData();
+            fd.append('file', audioBlob, 'milo-voice.webm');
+            // pass language hint
+            fd.append('languageCode', googleCloudData.config.languageCode || 'en-US');
+            // If client knows encoding, pass it as a hint
+            if (googleCloudData.config.encoding) fd.append('encoding', googleCloudData.config.encoding);
+            // channelCount is optional in voiceRecording.prepareForGoogleCloud; omit if not present
+            return await fetch(`${base}/api/speech-to-text-upload`, { method: 'POST', body: fd });
+          } catch (err) {
+            throw err;
+          }
+        };
+
+        try {
+          const multipartResp = await tryMultipart();
+          if (multipartResp.ok) {
+            const json = await multipartResp.json();
+            return { transcript: json.transcript || '', confidence: typeof json.confidence === 'number' ? json.confidence : 0 };
+          }
+          // If server returned 404, treat as missing route and fall back
+          if (multipartResp.status === 404) {
+            console.warn('/api/speech-to-text-upload not found on server; falling back to JSON endpoint');
+          } else {
+            // For other non-ok statuses, log and fall through to JSON fallback
+            console.warn('Multipart upload failed, status:', multipartResp.status);
+          }
+        } catch (err) {
+          console.warn('Multipart upload attempt failed, falling back to JSON base64:', err);
+        }
+
+        // JSON base64 fallback: build payload but DO NOT include sampleRateHertz
+        // for container encodings like WEBM_OPUS to avoid sample-rate mismatch errors.
+        const payload: any = { content: googleCloudData.content, config: { ...googleCloudData.config } };
+        try {
+          const enc = (payload.config.encoding || '').toUpperCase();
+          if (enc === 'WEBM_OPUS' || enc === 'OGG_OPUS' || enc.includes('OPUS')) {
+            // remove sampleRateHertz to let server detect it from container header
+            delete payload.config.sampleRateHertz;
+          }
+        } catch (e) {
+          console.warn('Failed to normalize config for JSON fallback', e);
+        }
+
+        const resp = await fetch(`${base}/api/speech-to-text`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(googleCloudData)
+          body: JSON.stringify(payload)
         });
 
-        if (response.ok) {
-          const json = await response.json();
-          // Expecting { transcript: string, confidence: number }
-          return {
-            transcript: json.transcript || '',
-            confidence: typeof json.confidence === 'number' ? json.confidence : 0
-          } as SpeechToTextResult;
+        // If server complains about sample_rate_hertz mismatch, retry without it explicitly
+        if (!resp.ok) {
+          try {
+            const txt = await resp.text();
+            if (txt && txt.toLowerCase().includes('sample_rate_hertz')) {
+              console.warn('Server reported sample_rate_hertz mismatch; retrying without sampleRateHertz');
+              delete payload.config.sampleRateHertz;
+              const retry = await fetch(`${base}/api/speech-to-text`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              if (retry.ok) {
+                const json = await retry.json();
+                return { transcript: json.transcript || '', confidence: typeof json.confidence === 'number' ? json.confidence : 0 };
+              }
+            }
+          } catch (e) {
+            console.warn('Error reading server error text', e);
+          }
+        }
+
+        if (resp.ok) {
+          const json = await resp.json();
+          return { transcript: json.transcript || '', confidence: typeof json.confidence === 'number' ? json.confidence : 0 };
         }
       }
     } catch (err) {
       console.warn('Speech-to-text backend failed:', err);
+    }
+
+    // Last-resort fallback: use browser SpeechRecognition (live) if available
+    try {
+      // @ts-ignore
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        return await new Promise<SpeechToTextResult>((resolve) => {
+          // Start a short live recognition session as a fallback
+          const recog = new SpeechRecognition();
+          recog.lang = 'en-US';
+          recog.interimResults = false;
+          recog.maxAlternatives = 1;
+          recog.onresult = (ev: any) => {
+            const t = ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript;
+            const conf = ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].confidence || 0;
+            resolve({ transcript: t || '', confidence: conf } as SpeechToTextResult);
+            recog.stop();
+          };
+          recog.onerror = () => {
+            resolve(mockTranscription(audioBlob));
+            recog.stop();
+          };
+          // Prompt user to allow live mic access for the fallback
+          try {
+            recog.start();
+          } catch (e) {
+            resolve(mockTranscription(audioBlob));
+          }
+          // Give up after 8s
+          setTimeout(() => {
+            try { recog.stop(); } catch (e) {}
+            resolve(mockTranscription(audioBlob));
+          }, 8000);
+        });
+      }
+    } catch (e) {
+      console.warn('Browser SpeechRecognition fallback failed', e);
     }
 
     // Fallback: use mock transcription for demo/local

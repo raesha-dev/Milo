@@ -6,24 +6,20 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-import openai
 import logging
 # OpenAI moved exception classes between versions (v1 vs legacy). Try both import locations
+
+
+from google.cloud import language_v1, firestore, texttospeech, storage
 try:
-    from openai import AuthenticationError, RateLimitError, APIConnectionError, Timeout
-except Exception:
-    try:
-        # older/newer packages expose errors under openai.error
-        from openai.error import AuthenticationError, RateLimitError, APIConnectionError, Timeout
-    except Exception:
-        # Fallback: define them as generic Exception so imports don't fail — handlers may still catch generic Exception.
-        AuthenticationError = RateLimitError = APIConnectionError = Timeout = Exception
-from google.cloud import language_v1, firestore, texttospeech, storage, speech_v1
+    import azure.cognitiveservices.speech as speechsdk
+except ImportError:
+    speechsdk = None
+
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account as gservice_account
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+
 from cloud_utils import (
     safe_cloud_operation,
     validate_google_credentials,
@@ -34,6 +30,90 @@ from cloud_utils import (
 import threading
 import json
 import requests
+import base64
+import binascii
+
+
+def azure_speech_to_text(audio_bytes, language, content_type):
+    """REST helper to send audio bytes to Azure Speech-to-Text and return transcript.
+
+    Expects `audio_bytes` as raw bytes, `language` like 'en-US', and a `content_type` such
+    as 'audio/wav' or 'audio/mpeg'. Raises HTTP exceptions on non-2xx responses.
+    """
+    key = os.environ.get('AZURE_SPEECH_KEY')
+    region = os.environ.get('AZURE_SPEECH_REGION')
+    if not key or not region:
+        raise RuntimeError('Azure Speech not configured')
+
+    url = f"https://{region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
+    params = {'language': language}
+    headers = {
+        'Ocp-Apim-Subscription-Key': key,
+        'Content-Type': content_type,
+        'Accept': 'application/json'
+    }
+
+    resp = requests.post(url, params=params, headers=headers, data=audio_bytes, timeout=30)
+    resp.raise_for_status()
+
+    # Try to parse JSON response; fall back to plain text
+    try:
+        j = resp.json()
+    except Exception:
+        return resp.text or ''
+
+    # Azure STT returns 'DisplayText' on success; prefer it
+    if isinstance(j, dict):
+        if 'DisplayText' in j:
+            return j.get('DisplayText') or ''
+        nbest = j.get('NBest') or []
+        if isinstance(nbest, list) and nbest:
+            first = nbest[0]
+            return first.get('Display', '') or first.get('Lexical', '') or ''
+
+    return ''
+def azure_openai_chat(messages, max_tokens=150):
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("AZURE_OPENAI_KEY")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+
+    def _call_openai_com(messages, max_tokens):
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY not set for OpenAI.com fallback")
+        try:
+            import openai
+            openai.api_key = openai_key
+            model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+            resp = openai.ChatCompletion.create(model=model, messages=messages, max_tokens=max_tokens, temperature=0.7)
+            return resp["choices"][0]["message"]["content"]
+        except Exception:
+            raise
+
+    # If Azure config absent, try OpenAI.com fallback
+    if not all([endpoint, api_key, deployment]):
+        try:
+            return _call_openai_com(messages, max_tokens)
+        except Exception as e:
+            raise RuntimeError("Azure OpenAI not configured and OpenAI.com fallback failed: " + str(e))
+
+    # Try Azure OpenAI first
+    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+    headers = {"Content-Type": "application/json", "api-key": api_key}
+    payload = {"messages": messages, "max_tokens": max_tokens}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception as azure_err:
+        # Azure failed — attempt OpenAI.com fallback
+        try:
+            return _call_openai_com(messages, max_tokens)
+        except Exception:
+            # If fallback fails, re-raise the original Azure error for upstream handling
+            raise azure_err
 
 #Future Integration with Gemma trained models on data, language, sentiments, etc - now OpenAI usage
 
@@ -67,17 +147,13 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Expect environment variables (do not crash at import-time)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
-ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "true").lower() in ("1", "true", "yes")
+
 
 
 # Configure OpenAI if available, otherwise defer and log
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
-else:
-    openai.api_key = None
-    logging.warning("OPENAI_API_KEY not set - OpenAI features will return errors until configured.")
+
 
 # Configure rate limiting
 DEFAULT_LIMITS = {
@@ -115,11 +191,21 @@ def ensure_google_clients():
         if not validate_google_credentials(tts_client):
             raise CloudServiceError("Invalid TTS client credentials")
 
-        # Speech-to-Text client for voice transcription
+        # Speech-to-Text client: use Azure Speech Service when configured
         global speech_client
-        speech_client = speech_v1.SpeechClient()
-        if not validate_google_credentials(speech_client):
-            raise CloudServiceError("Invalid Speech-to-Text client credentials")
+        azure_speech_key = os.getenv("AZURE_SPEECH_KEY")
+        azure_speech_region = os.getenv("AZURE_SPEECH_REGION")
+        if azure_speech_key and azure_speech_region:
+            try:
+                # Create a SpeechConfig instance; we don't run a network validation here
+                # to avoid requiring a private key or network check at startup.
+                speech_client = speechsdk.SpeechConfig(subscription=azure_speech_key, region=azure_speech_region)
+                # default language; can be overridden per-request
+                speech_client.speech_recognition_language = "en-US"
+            except Exception:
+                raise CloudServiceError("Invalid Azure Speech configuration")
+        else:
+            logging.warning("AZURE_SPEECH_KEY or AZURE_SPEECH_REGION not set - Speech-to-Text disabled until configured.")
             
         storage_client = storage.Client()
         if not validate_google_credentials(storage_client):
@@ -170,9 +256,10 @@ def healthz():
     # Ensure key services are available
     ok = True
     details = {}
-    if not openai.api_key:
+    # Check Azure OpenAI API key instead of OpenAI client
+    if not os.getenv("AZURE_OPENAI_KEY"):
         ok = False
-        details['openai'] = 'missing_api_key'
+        details['azure_openai'] = 'missing_api_key'
     if not google_clients_initialized:
         # try to initialize now
         if not ensure_google_clients():
@@ -197,16 +284,6 @@ def chat():
     sentiment = data.get('sentiment')  # expected shape: { score, magnitude, label }
     translation = data.get('translation')  # expected shape: { originalLanguage, translatedText }
     try:
-        # If OpenAI usage is disabled (demo mode), return a safe simulated reply
-        if not ENABLE_OPENAI or not openai.api_key:
-            logging.warning("OpenAI disabled or API key missing; returning simulated chat response.")
-            simulated = (
-                "Hi — Milo here. I'm currently running in demo mode or can't reach the AI service. "
-                "I care about how you're feeling. Try describing one small thing that's on your mind, "
-                "and I'll listen."
-            )
-            return jsonify({"response": simulated, "simulated": True}), 200
-
         # Build the message list. Preserve the original system prompt first.
         messages = [{"role": "system", "content": systemPrompt}]
 
@@ -267,6 +344,9 @@ def chat():
         # Finally add the current user message (preserves existing flow)
         messages.append({"role": "user", "content": user_message})
 
+        # Call Azure OpenAI via our helper which returns the message text
+        content = azure_openai_chat(messages)
+
         # --- Automatic risk detection: compute risk for this user message.
         try:
             risk = _compute_risk(user_message, sentiment)
@@ -295,112 +375,69 @@ def chat():
         except Exception:
             logging.exception('Automatic risk detection failed; continuing without blocking chat flow')
 
-        # Legacy client (openai<1.0) uses ChatCompletion.create
-        # Tuned model and sampling parameters. Allow overriding via OPENAI_MODEL env
-        model_name = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
-        sampling = {
-            'temperature': float(os.getenv('OPENAI_TEMPERATURE', 0.8)),
-            'presence_penalty': float(os.getenv('OPENAI_PRESENCE_PENALTY', 0.6)),
-            'frequency_penalty': float(os.getenv('OPENAI_FREQUENCY_PENALTY', 0.7)),
-            'max_tokens': int(os.getenv('OPENAI_MAX_TOKENS', 150))
-        }
-
-        if hasattr(openai, 'ChatCompletion'):
-            response = openai.ChatCompletion.create(
-                model=model_name,
-                messages=messages,
-                temperature=sampling['temperature'],
-                presence_penalty=sampling['presence_penalty'],
-                frequency_penalty=sampling['frequency_penalty'],
-                max_tokens=sampling['max_tokens'],
-            )
-        else:
-            # Fallback in case a different client shape is present
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=150,
-            )
-
-        # Robust extraction of the generated content across client versions
-        content = None
+        # Post-process the output to remove repeated greetings or duplicated
+        # leading sentences which sometimes occur when prompts or system
+        # instructions are echoed. This is defensive and preserves the
+        # model's main content.
         try:
-            # new-ish style: response.choices[0].message.content
-            content = response.choices[0].message.content
-        except Exception:
+            import re
+
+            def _normalize_sentence(s):
+                # Lowercase, strip punctuation and whitespace for comparison
+                s = re.sub(r"[^a-z0-9]", "", (s or '').lower())
+                return s
+
+            sentences = re.split(r'(?<=[.!?])\s+', content.strip()) if isinstance(content, str) and content.strip() else []
+
+            # 1) Remove simple adjacent duplicate sentence (A A -> keep single A)
+            if len(sentences) >= 2:
+                first_norm = _normalize_sentence(sentences[0])
+                second_norm = _normalize_sentence(sentences[1])
+                if first_norm and first_norm == second_norm:
+                    sentences = [sentences[0]] + sentences[2:]
+
+            # 2) If a conversation window was provided, avoid repeating assistant's
+            # previous responses or questions. Remove sentences that are exact
+            # duplicates of recent assistant sentences (conservative check).
             try:
-                # dict-like shape: response.choices[0].message['content']
-                content = response.choices[0].message['content']
+                prev_assistant_texts = []
+                conv = data.get('conversation') or []
+                if isinstance(conv, list):
+                    for m in conv:
+                        if isinstance(m, dict) and m.get('role') == 'assistant':
+                            c = m.get('content') or m.get('message') or ''
+                            if c:
+                                prev_assistant_texts.append(c)
+
+                prev_norms = set(_normalize_sentence(p) for p in prev_assistant_texts if p)
+
+                if prev_norms and sentences:
+                    filtered = []
+                    for s in sentences:
+                        norm = _normalize_sentence(s)
+                        # If this sentence is a question and it already appeared
+                        # from the assistant recently, drop it. This prevents
+                        # repeated questions like "How are you?" showing again.
+                        if norm and norm in prev_norms and s.strip().endswith('?'):
+                            continue
+                        # Also drop generic exact duplicates of previous assistant sentences
+                        if norm and norm in prev_norms and len(norm) > 10:
+                            # only drop longer duplicates to avoid removing short common words
+                            continue
+                        filtered.append(s)
+
+                    # Ensure we don't produce an empty reply by accident
+                    if filtered:
+                        sentences = filtered
             except Exception:
-                try:
-                    # older style for completions: response.choices[0].text
-                    content = response.choices[0].text
-                except Exception:
-                    content = str(response)
+                logging.exception('Failed to compare reply against conversation history')
 
-                # Post-process the output to remove repeated greetings or duplicated
-                # leading sentences which sometimes occur when prompts or system
-                # instructions are echoed. This is defensive and preserves the
-                # model's main content.
-                try:
-                    import re
-
-                    def _normalize_sentence(s):
-                        # Lowercase, strip punctuation and whitespace for comparison
-                        s = re.sub(r"[^a-z0-9]", "", (s or '').lower())
-                        return s
-
-                    sentences = re.split(r'(?<=[.!?])\s+', content.strip()) if isinstance(content, str) and content.strip() else []
-
-                    # 1) Remove simple adjacent duplicate sentence (A A -> keep single A)
-                    if len(sentences) >= 2:
-                        first_norm = _normalize_sentence(sentences[0])
-                        second_norm = _normalize_sentence(sentences[1])
-                        if first_norm and first_norm == second_norm:
-                            sentences = [sentences[0]] + sentences[2:]
-
-                    # 2) If a conversation window was provided, avoid repeating assistant's
-                    # previous responses or questions. Remove sentences that are exact
-                    # duplicates of recent assistant sentences (conservative check).
-                    try:
-                        prev_assistant_texts = []
-                        conv = data.get('conversation') or []
-                        if isinstance(conv, list):
-                            for m in conv:
-                                if isinstance(m, dict) and m.get('role') == 'assistant':
-                                    c = m.get('content') or m.get('message') or ''
-                                    if c:
-                                        prev_assistant_texts.append(c)
-
-                        prev_norms = set(_normalize_sentence(p) for p in prev_assistant_texts if p)
-
-                        if prev_norms and sentences:
-                            filtered = []
-                            for s in sentences:
-                                norm = _normalize_sentence(s)
-                                # If this sentence is a question and it already appeared
-                                # from the assistant recently, drop it. This prevents
-                                # repeated questions like "How are you?" showing again.
-                                if norm and norm in prev_norms and s.strip().endswith('?'):
-                                    continue
-                                # Also drop generic exact duplicates of previous assistant sentences
-                                if norm and norm in prev_norms and len(norm) > 10:
-                                    # only drop longer duplicates to avoid removing short common words
-                                    continue
-                                filtered.append(s)
-
-                            # Ensure we don't produce an empty reply by accident
-                            if filtered:
-                                sentences = filtered
-                    except Exception:
-                        logging.exception('Failed to compare reply against conversation history')
-
-                    # Reassemble content
-                    if sentences:
-                        content = ' '.join(sentences).strip()
-                except Exception:
-                    # Never fail the whole request due to post-processing errors
-                    logging.exception('Failed to post-process assistant reply')
+            # Reassemble content
+            if sentences:
+                content = ' '.join(sentences).strip()
+        except Exception:
+            # Never fail the whole request due to post-processing errors
+            logging.exception('Failed to post-process assistant reply')
 
         # Return AI response and include any automatic risk assessment info
         resp_payload = {"response": content}
@@ -417,23 +454,26 @@ def chat():
             logging.exception('Failed to attach alertId to response')
 
         return jsonify(resp_payload)
-    except (AuthenticationError, RateLimitError, APIConnectionError, Timeout, requests.exceptions.RequestException) as e:
-        # Network, rate limit, or auth problems. Return a clear 503 for transient issues.
-        logging.exception("OpenAI service error in /api/chat")
+
+    except requests.exceptions.RequestException as e:
+        logging.exception("Azure OpenAI service error in /api/chat")
+        return jsonify({
+            "error": "azure_openai_unavailable",
+            "message": str(e)
+        }), 503
+    except Exception as e:
+        logging.exception("Azure OpenAI service error in /api/chat")
         # Provide a simulated message for demo-safety while surfacing the error code
         simulated = (
             "Hi — Milo here. I couldn't reach the AI service right now, but I'm still here to listen. "
             "If this is urgent, consider reaching out to a trusted person or emergency services."
         )
         return jsonify({
-            "error": "openai_unavailable",
+            "error": "azure_openai_unavailable",
             "message": str(e),
             "simulated": True,
             "response": simulated
         }), 503
-    except Exception as e:
-        logging.exception("Unexpected error in /api/chat")
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/sentiment", methods=["POST"])
@@ -499,54 +539,167 @@ def speech_to_text():
         return jsonify({'error': 'Google Cloud services unavailable'}), 503
 
     try:
-        # Build RecognitionAudio and RecognitionConfig
-        audio = speech_v1.RecognitionAudio(content=content)
+        # Support clients sending either raw bytes (binary) or base64-encoded strings
+        audio_bytes = None
+        if isinstance(content, str):
+            # Attempt to decode base64 string content
+            try:
+                audio_bytes = base64.b64decode(content, validate=True)
+            except (binascii.Error, ValueError) as e:
+                logging.warning('Invalid base64 audio payload provided to /api/speech-to-text')
+                return jsonify({'error': 'Invalid base64 audio content', 'details': str(e)}), 400
+        elif isinstance(content, (bytes, bytearray)):
+            audio_bytes = bytes(content)
+        else:
+            # Unknown content type
+            return jsonify({'error': 'Invalid audio content type; expected base64 string or bytes'}), 400
 
-        # Map encoding string to enum if possible
+        # Use Azure Speech SDK for recognition
+        if not speech_client:
+            return jsonify({'error': 'Speech service not configured'}), 503
+
+        # Prepare SpeechConfig (speech_client is a SpeechConfig instance)
+        speech_config = speech_client
+        # allow overriding language from client config
+        lang = config.get('languageCode', 'en-US')
+        try:
+            speech_config.speech_recognition_language = lang
+        except Exception:
+            pass
+
+        # Map encoding/sample rate hints (best-effort). Azure accepts raw PCM
+        # wave formats more reliably; for container formats we'll still push
+        # bytes and let the service attempt to decode.
         encoding_str = (config.get('encoding') or '').upper()
-        encoding = speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
-        if encoding_str == 'WEBM_OPUS':
-            encoding = speech_v1.RecognitionConfig.AudioEncoding.WEBM_OPUS
-        elif encoding_str == 'FLAC':
-            encoding = speech_v1.RecognitionConfig.AudioEncoding.FLAC
-        elif encoding_str == 'LINEAR16' or encoding_str == 'PCM16':
-            encoding = speech_v1.RecognitionConfig.AudioEncoding.LINEAR16
+        sample_rate = int(config.get('sampleRateHertz', 16000))
 
-        recognition_config = speech_v1.RecognitionConfig(
-            encoding=encoding,
-            sample_rate_hertz=int(config.get('sampleRateHertz', 16000)),
-            language_code=config.get('languageCode', 'en-US'),
-            enable_automatic_punctuation=bool(config.get('enableAutomaticPunctuation', True)),
-            audio_channel_count=int(config.get('channelCount', 1))
-        )
+        # Create a push stream. Use wave PCM format when LINEAR16/PCM16 provided.
+        try:
+            if encoding_str in ('LINEAR16', 'PCM16'):
+                audio_format = speechsdk.audio.AudioStreamFormat.get_wave_format_pcm(sample_rate, 16, int(config.get('channelCount', 1)))
+                push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
+            else:
+                push_stream = speechsdk.audio.PushAudioInputStream()
 
-        # Use synchronous recognize for small audio payloads (safe for short recordings)
-        response = speech_client.recognize(config=recognition_config, audio=audio)
+            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+            recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
 
-        transcript = ''
-        confidence = 0.0
+            # Write audio bytes and close stream so recognizer can process
+            push_stream.write(audio_bytes)
+            push_stream.close()
 
-        if response.results:
-            # Concatenate alternatives transcripts
-            parts = []
-            confidences = []
-            for result in response.results:
-                if result.alternatives:
-                    alt = result.alternatives[0]
-                    parts.append(alt.transcript)
-                    if hasattr(alt, 'confidence'):
-                        confidences.append(alt.confidence)
+            result = recognizer.recognize_once()
 
-            transcript = ' '.join(parts).strip()
-            if confidences:
-                # average confidence as a simple heuristic
-                confidence = float(sum(confidences) / len(confidences))
+            transcript = ''
+            confidence = 0.0
 
-        return jsonify({'transcript': transcript, 'confidence': confidence})
+            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                transcript = result.text or ''
+                # Azure SDK does not always surface confidence for short sync calls
+                # Keep confidence at 0.0 when unavailable to preserve response shape
+                confidence = 0.0
+            else:
+                # No match or canceled -> empty transcript
+                transcript = ''
+                confidence = 0.0
+
+            return jsonify({'transcript': transcript, 'confidence': confidence})
+        except Exception as e:
+            logging.exception('Azure Speech recognition failed')
+            return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
     except Exception as e:
         logging.exception('Error in speech-to-text endpoint')
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+
+@app.route('/api/speech-to-text-upload', methods=['POST'])
+def speech_to_text_upload():
+    """Accept multipart/form-data with field `file` (the audio file) and optional `config` JSON string.
+    Returns the same shape as `/api/speech-to-text`.
+    """
+    # Ensure Google clients are initialized
+    if not ensure_google_clients():
+        return jsonify({'error': 'Google Cloud services unavailable'}), 503
+
+    # Expect a file under 'file'
+    if 'file' not in request.files:
+        return jsonify({'error': "Missing file field in multipart upload; expected 'file'"}), 400
+
+    f = request.files.get('file')
+    try:
+        file_bytes = f.read()
+    except Exception as e:
+        logging.exception('Failed reading uploaded file')
+        return jsonify({'error': 'Failed to read uploaded file', 'details': str(e)}), 400
+
+    # Optional config can be provided as a form field named 'config' (JSON)
+    config = {}
+    cfg_raw = request.form.get('config')
+    if cfg_raw:
+        try:
+            config = json.loads(cfg_raw)
+        except Exception:
+            # Non-fatal: continue with empty config but log
+            logging.warning('Ignored invalid JSON in multipart form field `config`')
+
+    try:
+        # Prepare a lightweight recognition config (used by Azure flow below)
+        encoding_str = (config.get('encoding') or '').upper()
+        recognition_config = {
+            'language_code': config.get('languageCode', 'en-US'),
+            'enable_automatic_punctuation': bool(config.get('enableAutomaticPunctuation', True)),
+            'audio_channel_count': int(config.get('channelCount', 1)),
+            'encoding': encoding_str,
+            'sample_rate_hertz': int(config.get('sampleRateHertz', 16000))
+        }
+
+        # Use Azure Speech SDK for recognition of uploaded file bytes
+        if not speech_client:
+            return jsonify({'error': 'Speech service not configured'}), 503
+
+        speech_config = speech_client
+        try:
+            speech_config.speech_recognition_language = recognition_config.language_code
+        except Exception:
+            pass
+
+        encoding_str = (config.get('encoding') or '').upper()
+        sample_rate = int(config.get('sampleRateHertz', 16000))
+
+        try:
+            if encoding_str in ('LINEAR16', 'PCM16'):
+                audio_format = speechsdk.audio.AudioStreamFormat.get_wave_format_pcm(sample_rate, 16, int(config.get('channelCount', 1)))
+                push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
+            else:
+                push_stream = speechsdk.audio.PushAudioInputStream()
+
+            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+            recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
+
+            push_stream.write(file_bytes)
+            push_stream.close()
+
+            result = recognizer.recognize_once()
+
+            transcript = ''
+            confidence = 0.0
+
+            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                transcript = result.text or ''
+                confidence = 0.0
+            else:
+                transcript = ''
+                confidence = 0.0
+
+            return jsonify({'transcript': transcript, 'confidence': confidence})
+        except Exception as e:
+            logging.exception('Azure Speech recognition failed for uploaded file')
+            return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+    except Exception as e:
+        logging.exception('Error in speech-to-text-upload endpoint')
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
 
 @app.route('/api/google-status', methods=['GET'])
@@ -594,8 +747,10 @@ def google_status():
         except Exception as e:
             info['errors'].append(f'Failed to locate ADC: {str(e)}')
 
-    # Also report whether our speech client is available
-    info['speech_client_initialized'] = speech_client is not None and google_clients_initialized
+    # Also report whether our Azure Speech config is available
+    info['azure_speech_key'] = bool(os.environ.get('AZURE_SPEECH_KEY'))
+    info['azure_speech_region'] = bool(os.environ.get('AZURE_SPEECH_REGION'))
+    info['azure_speech_configured'] = (speech_client is not None) and google_clients_initialized
 
     status = 200 if info.get('validated') else 503
     return jsonify(info), status
@@ -659,12 +814,25 @@ def tts():
             content_type='audio/mpeg'
         )
         
-        # Generate signed URL for secure access
-        audio_url = blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.timedelta(minutes=15),
-            method="GET"
-        )
+        # Generate signed URL for secure access. If the runtime credentials do
+        # not include a private key (typical for ADC on Cloud Run), the
+        # client will raise an AttributeError. In that case fall back to making
+        # the object public and returning the public URL (safer option is to
+        # enable IAM signing via iamcredentials API and grant tokenCreator role).
+        try:
+            audio_url = blob.generate_signed_url(
+                version="v4",
+                expiration=datetime.timedelta(minutes=15),
+                method="GET"
+            )
+        except AttributeError as e:
+            logging.warning('generate_signed_url failed due to missing private key in credentials; falling back to public URL')
+            try:
+                blob.make_public()
+                audio_url = blob.public_url
+            except Exception:
+                logging.exception('Failed to make blob public as fallback for signed URL')
+                raise
         
         logging.info(f"TTS audio generated and uploaded: {filename}")
         

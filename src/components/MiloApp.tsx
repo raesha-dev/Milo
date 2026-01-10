@@ -7,6 +7,8 @@ import { QuickCalm } from './QuickCalm';
 import { GrowthGarden } from './GrowthGarden';
 import { SupportRooms } from './SupportRooms';
 import { EmergencyHelp } from './EmergencyHelp';
+import logo from './logo/milo_o.ico';
+
 
 type ViewType = 'chat' | 'mood' | 'calm' | 'growth' | 'rooms' | 'help';
 type MessageColor = 'pink' | 'ocean' | 'sunset' | 'forest' | 'lavender' | 'rose';
@@ -63,8 +65,8 @@ export const MiloApp: React.FC<MiloAppProps> = ({ isDarkMode, onToggleTheme }) =
       {/* Header - Cream/Off-white */}
       <header className="bg-cream border-b border-cream/20 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center">
-            <span className="text-white font-bold text-lg">🌸</span>
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-300 to-blue-300 flex items-center justify-center">
+            <img src={logo} alt="logo" className="w-10 h-10 object-contain"/>
           </div>
           <div>
             <h1 className="text-cream-foreground font-semibold text-lg">Milo</h1>

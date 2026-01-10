@@ -137,7 +137,7 @@ export const QuickCalm: React.FC = () => {
         /* Exercise Selection */
         <div className="grid gap-4">
           {exercises.map((exercise) => (
-            <Card key={exercise.id} className="bg-white/90 backdrop-blur-sm cursor-pointer hover:shadow-lg transition-shadow">
+            <Card key={exercise.id} className="bg-cream/90 backdrop-blur-sm cursor-pointer hover:shadow-lg transition-shadow">
               <CardContent className="p-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-3">
@@ -174,7 +174,7 @@ export const QuickCalm: React.FC = () => {
       ) : (
         /* Active Exercise */
         <div className="space-y-6">
-          <Card className="bg-white/90 backdrop-blur-sm">
+          <Card className="bg-cream/90 backdrop-blur-sm">
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
                 <span className="flex items-center">

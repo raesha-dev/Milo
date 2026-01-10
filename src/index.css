@@ -279,6 +279,49 @@ All colors MUST be HSL.
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Viewport-based UI scaling -------------------------------------------------
+     Compute a UI scale factor based on the viewport width and height relative
+     to a design reference size. The scale clamps to reasonable bounds so very
+     small/large screens remain usable.
+
+     - --design-width / --design-height: reference canvas used when designing
+       the layout (change if you prefer a different base size)
+     - --ui-scale: final scale applied to the top-level .viewport-scale wrapper
+  --------------------------------------------------------------------------- */
+  :root {
+    --design-width: 1440; /* px */
+    --design-height: 900; /* px */
+    /* fraction of design filled by viewport */
+    --scale-x: calc(100vw / var(--design-width));
+    --scale-y: calc(100vh / var(--design-height));
+    /* Use the smaller scale so the app fits both horizontally and vertically */
+    --ui-scale-raw: min(var(--scale-x), var(--scale-y));
+    /* Clamp to avoid extremely small or huge scales */
+    --ui-scale: clamp(0.6, var(--ui-scale-raw), 1.15);
+  }
+
+  /* Top-level helper to scale the app responsively. Place this on a wrapper
+     that contains the entire application. It preserves layout/flow while
+     scaling visual appearance proportionally to the viewport. */
+  .viewport-scale {
+    width: 100%;
+    height: 100%;
+    transform-origin: top center;
+    transform: scale(var(--ui-scale));
+    transition: transform 160ms ease-out;
+    /* Ensure the scaled content does not cause unexpected scrollbars */
+    will-change: transform;
+  }
+
+  /* For accessibility/edge-cases: if the scale is much smaller than 1,
+     ensure interactive elements remain tappable by increasing pointer areas
+     slightly (keeps visual size but helps on tiny screens). */
+  @media (max-width: 420px) {
+    :root {
+      --ui-scale: calc(var(--ui-scale) + 0.05);
+    }
+  }
 }
 @tailwind base;
 @tailwind components;

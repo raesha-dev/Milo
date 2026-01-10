@@ -142,11 +142,14 @@ export const GrowthGarden: React.FC = () => {
         const weeks = Math.floor(data.totalDays / 7);
         setTotalWeeks(weeks);
         setCurrentWeek(weeks);
+        const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://milo-backend-73215611303.asia-south1.run.app';
+
 
         // Try to fetch persisted rewards from backend
         try {
           const userId = getOrCreateUserId();
-          const res = await fetch(`/api/rewards?userId=${encodeURIComponent(userId)}`);
+          const res = await fetch(`${BACKEND_URL}/api/rewards?userId=${encodeURIComponent(userId)}`);
+
 
           if (res.ok) {
             const payload = await res.json();

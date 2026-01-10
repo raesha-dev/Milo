@@ -9,6 +9,8 @@ import { getOrCreateUserId, loadUserData, saveUserData, appendUserArray } from '
 import { Sparkles, Award, Calendar, TrendingUp } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
+
+
 interface MoodOption {
   value: string;
   emoji: string;
@@ -334,13 +336,16 @@ export const MoodLogger: React.FC = () => {
     const newStreak = calculateStreakUpdate(streakData.lastLogDate);
     const now = new Date();
 
-    const newMood: MoodEntry = {
-      id: Date.now().toString(),
-      mood: moodValue,
-      emoji: emoji,
-      timestamp: now.toISOString(),
-      note: note
-    };
+  const userId = getOrCreateUserId();
+
+  const newMood: MoodEntry = {
+  id: Date.now().toString(),
+  userId,                          // REQUIRED BY BACKEND
+  mood: moodValue,
+  emoji: emoji,
+  timestamp: now.toISOString(),    // REQUIRED BY BACKEND
+  note: note ?? null //not undefined
+};
 
     setMoods(prev => [newMood, ...prev]);
     setSelectedMood(moodValue);
@@ -484,7 +489,7 @@ export const MoodLogger: React.FC = () => {
       </div>
 
       {/* Growth Stats */}
-      <Card className="mb-6 bg-white/95 backdrop-blur-sm shadow-lg">
+      <Card className="mb-6 bg-teal-50/80 backdrop-blur-sm shadow-lg">
         <CardHeader>
           <CardTitle className="text-lg flex items-center text-primary">
             🌸 Your Growth Progress
@@ -493,7 +498,7 @@ export const MoodLogger: React.FC = () => {
         <CardContent>
           <div className="space-y-4">
             <div>
-              <div className="flex justify-between text-sm mb-1">
+              <div className="flex justify-between text-sm mb-1 text-primary">
                 <span>Growth Points</span>
                 <span className="font-bold text-primary">{growthPoints} pts</span>
               </div>
@@ -508,7 +513,7 @@ export const MoodLogger: React.FC = () => {
                 <div className="text-xs text-muted-foreground">Day Streak</div>
               </div>
               <div className="bg-secondary/10 rounded-lg p-2">
-                <div className="text-2xl font-bold text-secondary">{streakData.weekNumber}</div>
+                <div className="text-2xl font-bold text-primary">{streakData.weekNumber}</div>
                 <div className="text-xs text-muted-foreground">Weeks</div>
               </div>
               <div className="bg-primary/10 rounded-lg p-2">

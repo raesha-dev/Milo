@@ -1,1 +1,8 @@
-{"content":"","config":{"encoding":"WEBM_OPUS","sampleRateHertz":16000,"languageCode":"en-US","enableAutomaticPunctuation":true,"channelCount":1}}
+{
+  "content": "",
+  "config": {
+    "encoding": "LINEAR16",
+    "sampleRateHertz": 16000,
+    "languageCode": "en-US"
+  }
+}
