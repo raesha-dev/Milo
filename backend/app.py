@@ -12,7 +12,7 @@ import logging
 
 from google.cloud import language_v1, firestore, texttospeech, storage
 try:
-    import azure.cognitiveservices.speech as speechsdk
+    import azure.cognitiveservices.speech as speechsdk # Importing Azure, and initialising to none till azure credits received
 except ImportError:
     speechsdk = None
 
