@@ -1,4 +1,4 @@
-# Milo — A Digital Companion for Youth Mental Wellness
+# Milo : A Digital Companion for Youth Mental Wellness
 
 ## Overview
 
