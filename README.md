@@ -2,9 +2,9 @@
 
 ## Overview
 
-Milo is an AI-based conversational system designed to support youth mental wellness through a familiar, low-friction interaction model — similar to social media direct messages.
+Milo is an AI-based conversational system designed to support youth mental wellness through a familiar, low-friction interaction model - inspired by social media direct messages.
 
-The idea behind Milo comes from a simple observation: in today’s social media-driven environment, many young people spend hours online, yet still feel isolated, unnoticed, or emotionally unheard. Moments like “no one texting back” or constant comparison with others can quietly affect mental well-being.
+The system is built around a simple observation: in today’s social media-driven environment, many young people are constantly connected, yet often feel isolated, unnoticed, or emotionally unheard. Moments such as “no one texting back” or silent comparison with others can quietly affect mental well-being.
 
 Milo attempts to exist within this space — not as a replacement for human connection, but as a system that can gently reach out, respond, and provide support when needed.
 
@@ -14,43 +14,43 @@ Milo attempts to exist within this space — not as a replacement for human conn
 
 While building Milo, a central question emerged:
 
-> If an AI system is interacting with emotionally vulnerable users, how can it be made safe, reliable, and worthy of trust?
+> If an AI system interacts with emotionally vulnerable users, how can it be made safe, reliable, and worthy of trust?
 
-This project is an attempt to explore that question through system design, controlled interaction, and safety-aware response generation.
+This project explores that question through system design, controlled interaction, and safety-aware response generation — focusing not just on what the system says, but how it behaves.
 
 ---
 
-## Core Idea
+## Core Principles
 
-Milo is designed around three principles:
+Milo is designed around three foundational principles:
 
-- **Trust** — responses should be predictable, supportive, and non-harmful  
-- **Safety** — the system must detect distress and respond responsibly  
-- **Anonymity** — users should feel safe interacting without exposing personal identity  
+- **Trust** - responses must be predictable, supportive, and non-harmful  
+- **Safety** - the system must detect distress and respond responsibly  
+- **Anonymity** - users should feel safe interacting without exposing identity  
 
-At the same time, the system must still **reach out meaningfully**, especially when a user may not actively seek help.
+At the same time, the system must still **reach out meaningfully**, especially in moments when users may not actively seek help.
 
 ---
 
 ## Features
 
 - **DM-style Interaction (Instagram-inspired)**  
-  A familiar chat interface to reduce hesitation and cognitive load, designed to feel like a natural conversation rather than a clinical tool.
+  A familiar chat interface that reduces hesitation and makes interaction feel natural rather than clinical.
 
 - **Proactive Check-ins**  
-  Gentle messages such as “How are you feeling today?” or small nudges that simulate social interaction in moments of silence.
+  Context-aware messages such as emotional check-ins and gentle prompts during periods of inactivity.
 
 - **Mood Tracking**  
-  Users can log emotions over time, helping identify patterns in behavior and mental state.
+  Logging and visualizing emotional patterns over time to support self-awareness.
 
 - **Calm Practices**  
-  Short, guided exercises (30–60 seconds) for grounding and stress relief.
+  Short (30–60 second) guided exercises for grounding and stress relief.
 
 - **Anonymous Interaction Layer**  
-  No requirement for personal identity, allowing users to engage without fear of judgment.
+  No requirement for personal identity, enabling safe and judgment-free interaction.
 
 - **Distress Detection System**  
-  Identifies signals of emotional distress or harmful intent and responds with:
+  Detects signals of emotional distress or harmful intent and responds with:
   - supportive language  
   - de-escalation strategies  
   - suggestions to seek professional help  
@@ -60,13 +60,29 @@ At the same time, the system must still **reach out meaningfully**, especially w
 ## Design Considerations
 
 ### 1. Social Context Integration
-Research shows that platforms like Instagram are among the most used by youth. Milo adopts a DM-style interface to meet users where they already are, with future scope for integration into social platforms.
+
+Platforms like Instagram are widely used among youth in India, making DM-style interaction a natural and familiar interface.
+
+Reference:  
+https://www.business-standard.com/article/technology/instagram-most-preferred-platform-among-indian-youth-survey-120100900588_1.html
+
+Milo is designed with future potential for integration into such environments, where support can exist within everyday digital interactions.
+
+---
 
 ### 2. Colour & Interface Design
-The interface is designed using calm, low-intensity color palettes inspired by color psychology research, aiming to reduce anxiety and create a sense of emotional safety.
+
+The interface uses calm, low-intensity color palettes informed by research in color psychology to reduce anxiety and create a sense of emotional safety.
+
+Reference:  
+https://www.researchgate.net/publication/388544060_The_Influence_Of_Colour_On_Social_Media_User_Behaviour_and_Designing_Engagement
+
+---
 
 ### 3. Safety over Fluency
-The goal is not just to generate fluent responses, but to ensure that responses are:
+
+The objective is not just fluent conversation, but **controlled and responsible interaction**. Responses are designed to be:
+
 - appropriate  
 - non-triggering  
 - aligned with user well-being  
@@ -77,54 +93,60 @@ The goal is not just to generate fluent responses, but to ensure that responses 
 
 ### Frontend
 - Built using **React (Vite)**
-- Designed as a lightweight, chat-based interface inspired by social media DMs
+- Lightweight, chat-based interface inspired by social media messaging systems
 
 ### Backend
-- **Flask API** handling:
+- **Flask API** managing:
   - conversation flow  
   - safety checks  
   - response orchestration  
-- Containerized with **Docker**
+- Containerized using **Docker**
 
-### Cloud Infrastructure
-- Initially deployed using **Google Cloud Run**
-- Currently transitioning to **Microsoft Azure** for:
-  - tighter integration with AI services  
-  - better modularity and scalability  
+---
+
+## Cloud Infrastructure
+
+- Initially developed and deployed using **Google Cloud (Cloud Run)**  
+- Currently transitioning to **Microsoft Azure**
+
+### Reason for Transition
+- Better integration with AI services  
+- Improved modularity of system components  
+- More scalable architecture for future deployment  
 
 ---
 
 ## AI Pipeline
 
 - **Azure OpenAI**
-  - Generates conversational responses with controlled prompting
+  - Controlled conversational response generation
 
 - **Azure NLP Services**
-  - Detects sentiment, mood, and potential risk signals
+  - Sentiment analysis and distress signal detection
 
 - **Azure Cosmos DB / Blob Storage**
-  - Stores anonymized interaction data
-  - No personally identifiable information is retained
+  - Stores anonymized interaction data  
+  - No personally identifiable information is retained  
 
 - **Azure Text-to-Speech**
-  - Supports guided calm exercises
+  - Supports guided calm exercises  
 
 ---
 
 ## Challenges in Building Safe AI Systems
 
-Working on Milo highlighted several challenges:
+Developing Milo highlighted several challenges:
 
 - **Unpredictability of language models** in sensitive contexts  
-- Difficulty in distinguishing between:
-  - casual expressions  
+- Distinguishing between:
+  - casual emotional expression  
   - genuine distress signals  
 - Ensuring responses are helpful without being:
   - overly intrusive  
   - dismissive  
-- Balancing **anonymity** with the need to escalate serious situations  
+- Balancing **anonymity** with the need for escalation in critical situations  
 
-These challenges reinforce that building such systems requires not just engineering, but careful consideration of human behavior and ethical responsibility.
+These challenges emphasize that building such systems requires not only engineering, but careful consideration of human behavior and ethical responsibility.
 
 ---
 
@@ -133,21 +155,24 @@ These challenges reinforce that building such systems requires not just engineer
 This project is **actively under development**.
 
 The current system demonstrates:
-- end-to-end conversational flow  
-- basic safety mechanisms  
+- end-to-end conversational pipeline  
+- initial safety mechanisms  
 - integration with cloud-based AI services  
 
-However, improving reliability, safety guarantees, and evaluation methods remains an ongoing effort.
+Ongoing work focuses on improving:
+- reliability  
+- response consistency  
+- safety evaluation methods  
 
 ---
 
 ## Future Direction
 
-The long-term vision is to explore how systems like Milo could:
+The long-term goal is to explore how systems like Milo could:
 
-- be integrated into large-scale social platforms  
-- provide safe, accessible support within everyday digital environments  
-- operate as assistive layers rather than standalone tools  
+- integrate into large-scale social platforms  
+- provide accessible support within everyday digital environments  
+- function as assistive layers rather than standalone tools  
 
 ---
 
