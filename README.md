@@ -16,7 +16,7 @@ While building Milo, a central question emerged:
 
 > If an AI system interacts with emotionally vulnerable users, how can it be made safe, reliable, and worthy of trust?
 
-This project explores that question through system design, controlled interaction, and safety-aware response generation — focusing not just on what the system says, but how it behaves.
+This project explores that question through system design, controlled interaction, and safety-aware response generation - focusing not just on what the system says, but how it behaves.
 
 ---
 
