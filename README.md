@@ -6,7 +6,7 @@ Milo is an AI-based conversational system designed to support youth mental welln
 
 The system is built around a simple observation: in today’s social media-driven environment, many young people are constantly connected, yet often feel isolated, unnoticed, or emotionally unheard. Moments such as “no one texting back” or silent comparison with others can quietly affect mental well-being.
 
-Milo attempts to exist within this space — not as a replacement for human connection, but as a system that can gently reach out, respond, and provide support when needed.
+Milo attempts to exist within this space - not as a replacement for human connection, but as a system that can gently reach out, respond, and provide support when needed.
 
 ---
 
