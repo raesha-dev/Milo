@@ -176,7 +176,7 @@ The long-term goal is to explore how systems like Milo could:
 
 ---
 
-## Closing Note
+## Conclusion
 
 Milo is not just about building a chatbot.
 
