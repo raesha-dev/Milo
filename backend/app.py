@@ -7,14 +7,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 import logging
-# OpenAI moved exception classes between versions (v1 vs legacy). Try both import locations
-
-
-from google.cloud import language_v1, firestore, texttospeech, storage
-try:
-    import azure.cognitiveservices.speech as speechsdk # Importing Azure, and initialising to none till azure credits received
-except ImportError:
-    speechsdk = None
+from google.cloud import language_v1, firestore, texttospeech, storage, speech_v1
 
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -34,88 +27,148 @@ import base64
 import binascii
 
 
-def azure_speech_to_text(audio_bytes, language, content_type):
-    """REST helper to send audio bytes to Azure Speech-to-Text and return transcript.
+def _get_google_access_token():
+    """Return an OAuth token for Google Cloud REST APIs."""
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    creds, _ = google.auth.default(scopes=scopes)
+    creds.refresh(GoogleAuthRequest())
+    return creds.token
 
-    Expects `audio_bytes` as raw bytes, `language` like 'en-US', and a `content_type` such
-    as 'audio/wav' or 'audio/mpeg'. Raises HTTP exceptions on non-2xx responses.
+
+def _google_vertex_chat(messages, max_tokens=150):
+    """Generate a Milo chat response with Vertex AI Gemini.
+
+    The public /api/chat contract still sends role/content message dicts.
+    This adapter converts that shape to Gemini's generateContent payload.
     """
-    key = os.environ.get('AZURE_SPEECH_KEY')
-    region = os.environ.get('AZURE_SPEECH_REGION')
-    if not key or not region:
-        raise RuntimeError('Azure Speech not configured')
+    project = (
+        os.getenv("GOOGLE_CLOUD_PROJECT")
+        or os.getenv("GCLOUD_PROJECT")
+        or os.getenv("GCP_PROJECT")
+    )
+    location = os.getenv("GOOGLE_VERTEX_LOCATION", "us-central1")
+    model = os.getenv("GOOGLE_VERTEX_MODEL", "gemini-1.5-flash")
 
-    url = f"https://{region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
-    params = {'language': language}
+    if not project:
+        raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set for Vertex AI chat")
+
+    system_parts = []
+    contents = []
+    for message in messages:
+        role = message.get("role", "user")
+        text = message.get("content", "")
+        if not text:
+            continue
+        if role == "system":
+            system_parts.append({"text": text})
+            continue
+        contents.append({
+            "role": "model" if role == "assistant" else "user",
+            "parts": [{"text": text}]
+        })
+
+    if not contents:
+        raise RuntimeError("No chat content provided")
+
+    url = (
+        f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}"
+        f"/locations/{location}/publishers/google/models/{model}:generateContent"
+    )
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.7
+        }
+    }
+    if system_parts:
+        payload["systemInstruction"] = {"parts": system_parts}
+
     headers = {
-        'Ocp-Apim-Subscription-Key': key,
-        'Content-Type': content_type,
-        'Accept': 'application/json'
+        "Authorization": f"Bearer {_get_google_access_token()}",
+        "Content-Type": "application/json"
     }
 
-    resp = requests.post(url, params=params, headers=headers, data=audio_bytes, timeout=30)
-    resp.raise_for_status()
-
-    # Try to parse JSON response; fall back to plain text
-    try:
-        j = resp.json()
-    except Exception:
-        return resp.text or ''
-
-    # Azure STT returns 'DisplayText' on success; prefer it
-    if isinstance(j, dict):
-        if 'DisplayText' in j:
-            return j.get('DisplayText') or ''
-        nbest = j.get('NBest') or []
-        if isinstance(nbest, list) and nbest:
-            first = nbest[0]
-            return first.get('Display', '') or first.get('Lexical', '') or ''
-
-    return ''
-def azure_openai_chat(messages, max_tokens=150):
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    api_key = os.getenv("AZURE_OPENAI_KEY")
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-
-    def _call_openai_com(messages, max_tokens):
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if not openai_key:
-            raise RuntimeError("OPENAI_API_KEY not set for OpenAI.com fallback")
-        try:
-            import openai
-            openai.api_key = openai_key
-            model = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-            resp = openai.ChatCompletion.create(model=model, messages=messages, max_tokens=max_tokens, temperature=0.7)
-            return resp["choices"][0]["message"]["content"]
-        except Exception:
-            raise
-
-    # If Azure config absent, try OpenAI.com fallback
-    if not all([endpoint, api_key, deployment]):
-        try:
-            return _call_openai_com(messages, max_tokens)
-        except Exception as e:
-            raise RuntimeError("Azure OpenAI not configured and OpenAI.com fallback failed: " + str(e))
-
-    # Try Azure OpenAI first
-    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-    headers = {"Content-Type": "application/json", "api-key": api_key}
-    payload = {"messages": messages, "max_tokens": max_tokens}
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response.raise_for_status()
+    data = response.json()
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except Exception as azure_err:
-        # Azure failed — attempt OpenAI.com fallback
-        try:
-            return _call_openai_com(messages, max_tokens)
-        except Exception:
-            # If fallback fails, re-raise the original Azure error for upstream handling
-            raise azure_err
+        candidate = data["candidates"][0]
+        parts = candidate.get("content", {}).get("parts", [])
+        content = "".join(part.get("text", "") for part in parts).strip()
+    except (KeyError, IndexError, TypeError):
+        content = ""
 
-#Future Integration with Gemma trained models on data, language, sentiments, etc - now OpenAI usage
+    if not content:
+        raise RuntimeError("Vertex AI returned an empty chat response")
+
+    return content
+
+
+def _google_speech_to_text(audio_bytes, config):
+    """Transcribe audio bytes with Google Cloud Speech-to-Text."""
+    if not speech_client:
+        raise RuntimeError("Google Cloud Speech-to-Text is not configured")
+
+    def _as_bool(value, default=True):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() not in ("false", "0", "no", "off")
+        return bool(value)
+
+    config = config or {}
+    encoding_name = (config.get("encoding") or "").upper()
+    if encoding_name == "PCM16":
+        encoding_name = "LINEAR16"
+    encoding_map = speech_v1.RecognitionConfig.AudioEncoding
+
+    recognition_kwargs = {
+        "language_code": config.get("languageCode", "en-US"),
+        "enable_automatic_punctuation": _as_bool(config.get("enableAutomaticPunctuation"), True),
+    }
+
+    if encoding_name and hasattr(encoding_map, encoding_name):
+        recognition_kwargs["encoding"] = getattr(encoding_map, encoding_name)
+
+    sample_rate = config.get("sampleRateHertz")
+    if sample_rate:
+        recognition_kwargs["sample_rate_hertz"] = int(sample_rate)
+
+    channel_count = config.get("channelCount")
+    if channel_count:
+        recognition_kwargs["audio_channel_count"] = int(channel_count)
+
+    model = config.get("model")
+    if model:
+        recognition_kwargs["model"] = model
+
+    response = speech_client.recognize(
+        request={
+            "config": speech_v1.RecognitionConfig(**recognition_kwargs),
+            "audio": speech_v1.RecognitionAudio(content=audio_bytes)
+        }
+    )
+
+    transcripts = []
+    confidences = []
+    for result in response.results:
+        if not result.alternatives:
+            continue
+        alternative = result.alternatives[0]
+        if alternative.transcript:
+            transcripts.append(alternative.transcript)
+        if alternative.confidence:
+            confidences.append(float(alternative.confidence))
+
+    transcript = " ".join(transcripts).strip()
+    confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return transcript, confidence
+
+# Future integration can further tune Gemini/Gemma models on language, sentiment, and wellbeing patterns.
 
 systemPrompt="""You are Milo — a kind, emotionally intelligent wellbeing companion. You are a friendly conversational AI for mental wellness journaling.
 Avoid repeating greetings or asking 'How are you?' multiple times.
@@ -152,9 +205,6 @@ GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
 
 
-# Configure OpenAI if available, otherwise defer and log
-
-
 # Configure rate limiting
 DEFAULT_LIMITS = {
     "1 per second": ["sentiment", "tts"],  # More expensive operations
@@ -173,7 +223,7 @@ google_clients_initialized = False
 
 def ensure_google_clients():
     """Initialize Google clients lazily with validation. Returns True on success, False on failure."""
-    global language_client, firestore_client, tts_client, storage_client, bucket, google_clients_initialized
+    global language_client, speech_client, firestore_client, tts_client, storage_client, bucket, google_clients_initialized
     if google_clients_initialized:
         return True
         
@@ -191,21 +241,9 @@ def ensure_google_clients():
         if not validate_google_credentials(tts_client):
             raise CloudServiceError("Invalid TTS client credentials")
 
-        # Speech-to-Text client: use Azure Speech Service when configured
-        global speech_client
-        azure_speech_key = os.getenv("AZURE_SPEECH_KEY")
-        azure_speech_region = os.getenv("AZURE_SPEECH_REGION")
-        if azure_speech_key and azure_speech_region:
-            try:
-                # Create a SpeechConfig instance; we don't run a network validation here
-                # to avoid requiring a private key or network check at startup.
-                speech_client = speechsdk.SpeechConfig(subscription=azure_speech_key, region=azure_speech_region)
-                # default language; can be overridden per-request
-                speech_client.speech_recognition_language = "en-US"
-            except Exception:
-                raise CloudServiceError("Invalid Azure Speech configuration")
-        else:
-            logging.warning("AZURE_SPEECH_KEY or AZURE_SPEECH_REGION not set - Speech-to-Text disabled until configured.")
+        speech_client = speech_v1.SpeechClient()
+        if not validate_google_credentials(speech_client):
+            raise CloudServiceError("Invalid Speech-to-Text client credentials")
             
         storage_client = storage.Client()
         if not validate_google_credentials(storage_client):
@@ -256,10 +294,9 @@ def healthz():
     # Ensure key services are available
     ok = True
     details = {}
-    # Check Azure OpenAI API key instead of OpenAI client
-    if not os.getenv("AZURE_OPENAI_KEY"):
+    if not (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCLOUD_PROJECT") or os.getenv("GCP_PROJECT")):
         ok = False
-        details['azure_openai'] = 'missing_api_key'
+        details['vertex_ai'] = 'missing_project'
     if not google_clients_initialized:
         # try to initialize now
         if not ensure_google_clients():
@@ -344,8 +381,8 @@ def chat():
         # Finally add the current user message (preserves existing flow)
         messages.append({"role": "user", "content": user_message})
 
-        # Call Azure OpenAI via our helper which returns the message text
-        content = azure_openai_chat(messages)
+        # Call Vertex AI via our Google Cloud helper which returns the message text
+        content = _google_vertex_chat(messages)
 
         # --- Automatic risk detection: compute risk for this user message.
         try:
@@ -456,20 +493,20 @@ def chat():
         return jsonify(resp_payload)
 
     except requests.exceptions.RequestException as e:
-        logging.exception("Azure OpenAI service error in /api/chat")
+        logging.exception("Google Vertex AI service error in /api/chat")
         return jsonify({
-            "error": "azure_openai_unavailable",
+            "error": "google_vertex_ai_unavailable",
             "message": str(e)
         }), 503
     except Exception as e:
-        logging.exception("Azure OpenAI service error in /api/chat")
+        logging.exception("Google Vertex AI service error in /api/chat")
         # Provide a simulated message for demo-safety while surfacing the error code
         simulated = (
             "Hi — Milo here. I couldn't reach the AI service right now, but I'm still here to listen. "
             "If this is urgent, consider reaching out to a trusted person or emergency services."
         )
         return jsonify({
-            "error": "azure_openai_unavailable",
+            "error": "google_vertex_ai_unavailable",
             "message": str(e),
             "simulated": True,
             "response": simulated
@@ -554,58 +591,11 @@ def speech_to_text():
             # Unknown content type
             return jsonify({'error': 'Invalid audio content type; expected base64 string or bytes'}), 400
 
-        # Use Azure Speech SDK for recognition
-        if not speech_client:
-            return jsonify({'error': 'Speech service not configured'}), 503
-
-        # Prepare SpeechConfig (speech_client is a SpeechConfig instance)
-        speech_config = speech_client
-        # allow overriding language from client config
-        lang = config.get('languageCode', 'en-US')
         try:
-            speech_config.speech_recognition_language = lang
-        except Exception:
-            pass
-
-        # Map encoding/sample rate hints (best-effort). Azure accepts raw PCM
-        # wave formats more reliably; for container formats we'll still push
-        # bytes and let the service attempt to decode.
-        encoding_str = (config.get('encoding') or '').upper()
-        sample_rate = int(config.get('sampleRateHertz', 16000))
-
-        # Create a push stream. Use wave PCM format when LINEAR16/PCM16 provided.
-        try:
-            if encoding_str in ('LINEAR16', 'PCM16'):
-                audio_format = speechsdk.audio.AudioStreamFormat.get_wave_format_pcm(sample_rate, 16, int(config.get('channelCount', 1)))
-                push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
-            else:
-                push_stream = speechsdk.audio.PushAudioInputStream()
-
-            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-            recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
-
-            # Write audio bytes and close stream so recognizer can process
-            push_stream.write(audio_bytes)
-            push_stream.close()
-
-            result = recognizer.recognize_once()
-
-            transcript = ''
-            confidence = 0.0
-
-            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                transcript = result.text or ''
-                # Azure SDK does not always surface confidence for short sync calls
-                # Keep confidence at 0.0 when unavailable to preserve response shape
-                confidence = 0.0
-            else:
-                # No match or canceled -> empty transcript
-                transcript = ''
-                confidence = 0.0
-
+            transcript, confidence = _google_speech_to_text(audio_bytes, config)
             return jsonify({'transcript': transcript, 'confidence': confidence})
         except Exception as e:
-            logging.exception('Azure Speech recognition failed')
+            logging.exception('Google Speech-to-Text recognition failed')
             return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
     except Exception as e:
@@ -642,59 +632,25 @@ def speech_to_text_upload():
         except Exception:
             # Non-fatal: continue with empty config but log
             logging.warning('Ignored invalid JSON in multipart form field `config`')
+    else:
+        # Current frontend sends these as individual form fields; keep that
+        # shape working while the canonical backend contract remains config JSON.
+        config = {
+            'languageCode': request.form.get('languageCode', 'en-US'),
+            'encoding': request.form.get('encoding') or None,
+            'sampleRateHertz': request.form.get('sampleRateHertz') or None,
+            'channelCount': request.form.get('channelCount') or None,
+            'enableAutomaticPunctuation': request.form.get('enableAutomaticPunctuation', 'true').lower() != 'false',
+            'model': request.form.get('model') or None
+        }
+        config = {k: v for k, v in config.items() if v is not None}
 
     try:
-        # Prepare a lightweight recognition config (used by Azure flow below)
-        encoding_str = (config.get('encoding') or '').upper()
-        recognition_config = {
-            'language_code': config.get('languageCode', 'en-US'),
-            'enable_automatic_punctuation': bool(config.get('enableAutomaticPunctuation', True)),
-            'audio_channel_count': int(config.get('channelCount', 1)),
-            'encoding': encoding_str,
-            'sample_rate_hertz': int(config.get('sampleRateHertz', 16000))
-        }
-
-        # Use Azure Speech SDK for recognition of uploaded file bytes
-        if not speech_client:
-            return jsonify({'error': 'Speech service not configured'}), 503
-
-        speech_config = speech_client
         try:
-            speech_config.speech_recognition_language = recognition_config.language_code
-        except Exception:
-            pass
-
-        encoding_str = (config.get('encoding') or '').upper()
-        sample_rate = int(config.get('sampleRateHertz', 16000))
-
-        try:
-            if encoding_str in ('LINEAR16', 'PCM16'):
-                audio_format = speechsdk.audio.AudioStreamFormat.get_wave_format_pcm(sample_rate, 16, int(config.get('channelCount', 1)))
-                push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
-            else:
-                push_stream = speechsdk.audio.PushAudioInputStream()
-
-            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-            recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
-
-            push_stream.write(file_bytes)
-            push_stream.close()
-
-            result = recognizer.recognize_once()
-
-            transcript = ''
-            confidence = 0.0
-
-            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                transcript = result.text or ''
-                confidence = 0.0
-            else:
-                transcript = ''
-                confidence = 0.0
-
+            transcript, confidence = _google_speech_to_text(file_bytes, config)
             return jsonify({'transcript': transcript, 'confidence': confidence})
         except Exception as e:
-            logging.exception('Azure Speech recognition failed for uploaded file')
+            logging.exception('Google Speech-to-Text recognition failed for uploaded file')
             return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
     except Exception as e:
@@ -747,10 +703,7 @@ def google_status():
         except Exception as e:
             info['errors'].append(f'Failed to locate ADC: {str(e)}')
 
-    # Also report whether our Azure Speech config is available
-    info['azure_speech_key'] = bool(os.environ.get('AZURE_SPEECH_KEY'))
-    info['azure_speech_region'] = bool(os.environ.get('AZURE_SPEECH_REGION'))
-    info['azure_speech_configured'] = (speech_client is not None) and google_clients_initialized
+    info['speech_to_text_configured'] = (speech_client is not None) and google_clients_initialized
 
     status = 200 if info.get('validated') else 503
     return jsonify(info), status
@@ -1524,5 +1477,3 @@ if __name__ == "__main__":
         logging.exception('Error during initial Google client initialization')
 
     app.run(host="0.0.0.0", port=port)
-
-

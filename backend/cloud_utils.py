@@ -4,13 +4,45 @@ Utility functions for Google Cloud service reliability and error handling.
 import time
 import logging
 from functools import wraps
-from google.api_core import retry
-from google.cloud import exceptions
-import google.auth
 import os
-from google.auth.transport.requests import Request as GoogleAuthRequest
-from google.oauth2 import service_account as gservice_account
-from typing import Callable, Any, Optional
+from typing import Callable, Any
+
+try:
+    from google.cloud import exceptions
+    import google.auth
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import service_account as gservice_account
+except ImportError:
+    google = None
+    GoogleAuthRequest = None
+    gservice_account = None
+
+    class _GoogleCloudException(Exception):
+        pass
+
+    class _FallbackExceptions:
+        class RetryError(_GoogleCloudException):
+            pass
+
+        class ServiceUnavailable(_GoogleCloudException):
+            pass
+
+        class InternalServerError(_GoogleCloudException):
+            pass
+
+        class DeadlineExceeded(_GoogleCloudException):
+            pass
+
+        class NotFound(_GoogleCloudException):
+            pass
+
+        class PermissionDenied(_GoogleCloudException):
+            pass
+
+        class InvalidArgument(_GoogleCloudException):
+            pass
+
+    exceptions = _FallbackExceptions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -135,6 +167,15 @@ def validate_google_credentials(client: Any) -> bool:
         bool: True if credentials are valid, False otherwise
     """
     try:
+        client_credentials = getattr(client, '_credentials', None)
+        if client_credentials:
+            client_credentials.refresh(GoogleAuthRequest() if GoogleAuthRequest else None)
+            return True
+
+        if google is None:
+            logger.error("Google Cloud libraries are not installed")
+            return False
+
         # If a service account JSON is explicitly provided via env var, prefer that
         key_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         if key_path:

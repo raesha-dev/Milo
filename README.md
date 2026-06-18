@@ -104,32 +104,74 @@ The objective is not just fluent conversation, but **controlled and responsible 
 
 ---
 
+## Local Development Setup
+
+Install frontend dependencies:
+
+```bash
+npm install
+```
+
+Create and install the backend Python environment:
+
+```bash
+python3 -m venv venv
+venv/bin/python -m pip install -r backend/requirements.txt
+```
+
+Configure Google Cloud credentials for backend service calls:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.secrets/milo-backend-sa.json"
+export GOOGLE_CLOUD_PROJECT="your-google-cloud-project-id"
+```
+
+Before starting the full app, run:
+
+```bash
+npm run check:env
+```
+
+Start frontend and backend together:
+
+```bash
+npm run dev
+```
+
+Backend unit tests can run without live Google Cloud credentials:
+
+```bash
+npm run test:backend
+```
+
+---
+
 ## Cloud Infrastructure
 
-- Initially developed and deployed using **Google Cloud (Cloud Run)**  
-- Currently transitioning to **Microsoft Azure**
+- Developed and deployed using **Google Cloud (Cloud Run)**
+- Uses Google Cloud services for AI, safety analysis, storage, and guided audio generation
 
-### Reason for Transition
-- Better integration with AI services  
-- Improved modularity of system components  
-- More scalable architecture for future deployment  
+### Reason for Google Cloud Architecture
+- Integrated AI services through Vertex AI and Google Cloud APIs
+- Improved modularity of system components
+- Scalable architecture for future deployment
 
 ---
 
 ## AI Pipeline
 
-- **Azure OpenAI**
+- **Google Vertex AI (Gemini)**
   - Controlled conversational response generation
 
-- **Azure NLP Services**
+- **Google Cloud Natural Language**
   - Sentiment analysis and distress signal detection
 
-- **Azure Cosmos DB / Blob Storage**
-  - Stores anonymized interaction data  
-  - No personally identifiable information is retained  
+- **Cloud Firestore / Cloud Storage**
+  - Stores anonymized interaction data
+  - No personally identifiable information is retained
 
-- **Azure Text-to-Speech**
-  - Supports guided calm exercises  
+- **Google Cloud Text-to-Speech**
+  - Supports guided calm exercises
 
 ---
 

@@ -2,8 +2,7 @@
 Unit tests for cloud utility functions
 """
 import pytest
-from unittest.mock import Mock, patch
-from google.api_core import exceptions
+from unittest.mock import Mock
 import time
 
 from cloud_utils import (
@@ -13,7 +12,8 @@ from cloud_utils import (
     CloudServiceError,
     RetryableError,
     NonRetryableError,
-    safe_cloud_operation
+    safe_cloud_operation,
+    exceptions
 )
 
 # Test exponential backoff decorator
@@ -154,7 +154,7 @@ def test_complete_error_handling_flow():
     
     @safe_cloud_operation("test_flow")
     @exponential_backoff(max_retries=2, initial_delay=0.1)
-    @circuit_breaker(failure_threshold=3, reset_timeout=0.1)
+    @circuit_breaker(failure_threshold=3, reset_timeout=1.0)
     def complex_operation():
         attempts[0] += 1
         if attempts[0] <= 2:
@@ -163,20 +163,17 @@ def test_complete_error_handling_flow():
             raise exceptions.InvalidArgument("Invalid input")
         return "success"
     
-    # First two attempts - retryable error
-    with pytest.raises(RetryableError):
-        complex_operation()
-    
-    # Next attempt - non-retryable error
+    # The explicit inner retry handles the first two temporary failures, then
+    # the third call raises InvalidArgument and opens the inner circuit.
     with pytest.raises(NonRetryableError):
         complex_operation()
     
-    # Circuit should now be open
-    with pytest.raises(exceptions.ServiceUnavailable):
+    # The next attempt sees the open circuit and is surfaced as retryable.
+    with pytest.raises(RetryableError):
         complex_operation()
     
     # Wait for circuit reset
-    time.sleep(0.2)
+    time.sleep(1.1)
     attempts[0] = 4  # Reset to success case
     
     # Should succeed after reset

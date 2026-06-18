@@ -4,14 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    
+    "check:env": "node scripts/check-dev-env.mjs",
     "dev:frontend": "vite",
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev": "npm run check:env && concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "dev:backend": "export GOOGLE_APPLICATION_CREDENTIALS=\"$HOME/.secrets/milo-backend-sa.json\" && cd backend && ../venv/bin/python app.py"
+    "dev:backend": "node scripts/run-backend.mjs",
+    "test:backend": "PYTHONPATH=backend python3 -m pytest backend/tests"
 
   },
   "dependencies": {

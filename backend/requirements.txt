@@ -7,7 +7,6 @@ google-cloud-language==2.11.0
 google-cloud-firestore==2.11.1
 google-cloud-texttospeech==2.14.1
 google-cloud-storage==2.13.0
-openai==0.28.1
 google-cloud-speech
 gunicorn==20.1.0
 requests==2.31.0
@@ -18,6 +17,5 @@ google-cloud-tasks
 google-cloud-secret-manager
 sendgrid
 twilio
-
 
 

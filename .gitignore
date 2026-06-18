@@ -13,6 +13,8 @@ frontend/venv
 bun.lockb
 backend/__pycache__/
 backend/*.pyc
+**/__pycache__/
+*.pyc
 backend/.pytest_cache/
 backend/scripts/
 backend/venv/
