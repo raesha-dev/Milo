@@ -1,3 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor,Future
+import uuid
+
+
 import os
 import uuid
 import time
@@ -12,6 +16,9 @@ from google.cloud import language_v1, firestore, texttospeech, storage, speech_v
 import google.auth
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account as gservice_account
+
+executor = ThreadPoolExecutor(max_workers=int(os.getenv("BG_WORKERS", "4"))) 
+_bg_jobs={} # For handling async tasks like TTS generation without blocking main thread
 
 from cloud_utils import (
     safe_cloud_operation,
@@ -92,15 +99,16 @@ def _google_vertex_chat(messages, max_tokens=150):
     response = requests.post(url, headers=headers, json=payload, timeout=30)
     response.raise_for_status()
     data = response.json()
-
-    try:
-        candidate = data["candidates"][0]
-        parts = candidate.get("content", {}).get("parts", [])
-        content = "".join(part.get("text", "") for part in parts).strip()
-    except (KeyError, IndexError, TypeError):
-        content = ""
+    # Robust parsing: try multiple common output shapes
+    content = ""
+    for candidate in data.get("candidates", []) or data.get("outputs", []) or []:
+        parts = (candidate.get("content", {}) or {}).get("parts") or (candidate.get("response", {}) or {}).get("parts") or []
+        if parts:
+            content = "".join(p.get("text", "") for p in parts).strip()
+            break
 
     if not content:
+        logging.warning("Unexpected Vertex response: %s", data)
         raise RuntimeError("Vertex AI returned an empty chat response")
 
     return content
@@ -313,6 +321,7 @@ def chat():
         return '', 204  # Respond to preflight requests
 
     data = request.get_json()
+    
     user_message = data.get("message")
     if not user_message:
         return jsonify({"error": "Missing 'message'"}), 400
@@ -709,9 +718,8 @@ def google_status():
     return jsonify(info), status
 
 @app.route("/api/tts", methods=["POST"])
-@safe_cloud_operation("text_to_speech")
 def tts():
-    data = request.get_json()
+    data = request.get_json() or {}
     text = data.get("text")
     if not text:
         return jsonify({"error": "Missing 'text'"}), 400
@@ -726,93 +734,56 @@ def tts():
     if not bucket:
         return jsonify({"error": "Storage bucket not configured"}), 503
         
-    try:
-        # Configure TTS request
-        synthesis_input = texttospeech.SynthesisInput(text=text)
-        voice = texttospeech.VoiceSelectionParams(
-            language_code="en-US",
-            ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
-            name="en-US-Journey-F"  # Consistent voice for Milo
-        )
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
-            speaking_rate=1.0,
-            pitch=0.0,
-            volume_gain_db=0.0
-        )
-        
-        # Generate speech
-        response = tts_client.synthesize_speech(
-            input=synthesis_input,
-            voice=voice,
-            audio_config=audio_config
-        )
-        
-        # Upload to Cloud Storage with proper organization
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"audio/{timestamp}-{uuid.uuid4()}.mp3"
-        blob = bucket.blob(filename)
-        
-        # Set appropriate metadata
-        metadata = {
-            'Content-Type': 'audio/mpeg',
-            'Content-Length': str(len(response.audio_content)),
-            'x-goog-meta-timestamp': timestamp,
-            'Cache-Control': 'public, max-age=86400'  # Cache for 24 hours
-        }
-        
-        blob.metadata = metadata
-        blob.upload_from_string(
-            response.audio_content,
-            content_type='audio/mpeg'
-        )
-        
-        # Generate signed URL for secure access. If the runtime credentials do
-        # not include a private key (typical for ADC on Cloud Run), the
-        # client will raise an AttributeError. In that case fall back to making
-        # the object public and returning the public URL (safer option is to
-        # enable IAM signing via iamcredentials API and grant tokenCreator role).
-        try:
-            audio_url = blob.generate_signed_url(
-                version="v4",
-                expiration=datetime.timedelta(minutes=15),
-                method="GET"
-            )
-        except AttributeError as e:
-            logging.warning('generate_signed_url failed due to missing private key in credentials; falling back to public URL')
+    # Determine async flag: default is synchronous to preserve behavior
+    async_flag = False
+    q_async = request.args.get('async')
+    if q_async is not None:
+        async_flag = str(q_async).lower() in ('1', 'true', 'yes')
+    elif 'async' in data:
+        async_flag = bool(data.get('async'))
+
+    # Ensure Google clients are available
+    if not ensure_google_clients():
+        return jsonify({"error": "Google Cloud services unavailable"}), 503
+    if not bucket:
+        return jsonify({"error": "Storage bucket not configured"}), 503
+
+    # Background async submission (only if explicitly requested)
+    if async_flag:
+        job_id = str(uuid.uuid4())
+        future = executor.submit(_tts_sync, text)
+        _bg_jobs[job_id] = {"future": future, "status": "pending"}
+        def _on_done(fut, jid=job_id):
             try:
-                blob.make_public()
-                audio_url = blob.public_url
-            except Exception:
-                logging.exception('Failed to make blob public as fallback for signed URL')
-                raise
-        
-        logging.info(f"TTS audio generated and uploaded: {filename}")
-        
-        return jsonify({
-            "audio_url": audio_url,
-            "expires_in": "15m",
-            "status": "success"
-        })
-        
+                res = fut.result()
+                _bg_jobs[jid] = {"future": fut, "status": "done", "result": res}
+            except Exception as e:
+                _bg_jobs[jid] = {"future": fut, "status": "failed", "error": str(e)}
+        future.add_done_callback(_on_done)
+        return jsonify({"status": "accepted", "jobId": job_id}), 202
+
+    # Synchronous flow (preserve original behavior)
+    try:
+        result = _tts_sync(text)
+        return jsonify(result), 200
     except RetryableError as e:
         logging.error(f"TTS operation failed after retries: {str(e)}")
         return jsonify({
             "error": "Service temporarily unavailable",
             "retry_after": "60"
         }), 503
-        
     except NonRetryableError as e:
         logging.error(f"Non-retryable error in TTS: {str(e)}")
         return jsonify({"error": str(e)}), 400
-        
     except CloudServiceError as e:
         logging.error(f"Cloud service error in TTS: {str(e)}")
         return jsonify({"error": "Internal service error"}), 500
-        
     except Exception as e:
         logging.exception("Unexpected error in TTS generation")
         return jsonify({"error": "Internal server error"}), 500
+
+
+
 
 @app.route("/api/mood", methods=["POST"])
 @safe_cloud_operation("save_mood")
@@ -885,34 +856,65 @@ def get_moods():
     try:
         # Build query
         query = firestore_client.collection("moods")
-        
+
         # Add filters if provided
         if user_id:
             query = query.where("userId", "==", user_id)
-            
+
+        # Parse ISO date strings into datetimes for Firestore queries
+        def _parse_iso_date(s: str):
+            try:
+                if s.endswith('Z'):
+                    s = s.replace('Z', '+00:00')
+                dt = datetime.datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                return dt
+            except Exception:
+                return None
+
         if start_date:
-            query = query.where("timestamp", ">=", start_date)
-            
+            start_dt = _parse_iso_date(start_date)
+            if not start_dt:
+                return jsonify({"error": "Invalid startDate format; use ISO8601"}), 400
+            query = query.where("timestamp", ">=", start_dt)
+
         if end_date:
-            query = query.where("timestamp", "<=", end_date)
-            
+            end_dt = _parse_iso_date(end_date)
+            if not end_dt:
+                return jsonify({"error": "Invalid endDate format; use ISO8601"}), 400
+            query = query.where("timestamp", "<=", end_dt)
+
         # Add sorting and limit
         query = query.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
-        
+
         # Execute query with automatic retries
         moods = []
-        docs = query.stream()
-        
+        try:
+            docs = query.stream()
+        except Exception as e:
+            # Surface Firestore index error guidance when applicable
+            msg = str(e)
+            index_url = None
+            try:
+                import re
+                m = re.search(r"https?://[^\"]+", msg)
+                if m:
+                    index_url = m.group(0)
+            except Exception:
+                index_url = None
+            return jsonify({"error": "Query failed, may require Firestore index", "details": msg, "indexUrl": index_url}), 400
+
         for doc in docs:
             mood = doc.to_dict()
             mood["id"] = doc.id
             # Remove internal fields
             mood.pop("_writeTime", None)
             moods.append(mood)
-            
+
         # Log successful retrieval
         logging.info(f"Retrieved {len(moods)} mood entries successfully")
-        
+
         return jsonify({
             "moods": moods,
             "count": len(moods),
@@ -1375,6 +1377,70 @@ def _compute_risk(text: str, initial_sentiment: dict = None):
         logging.exception('Error computing risk')
         # Fail-open: return conservative no-risk if computation fails
         return {'isRisky': False, 'riskLevel': 'none', 'reasons': [], 'requiresImmediate': False}
+
+
+# --- TTS helpers ---
+def _tts_impl(text: str):
+    """Core TTS implementation. Returns dict with audio_url, expires_in, status."""
+    # Configure TTS request
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="en-US",
+        ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
+        name="en-US-Journey-F"
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        speaking_rate=1.0,
+        pitch=0.0,
+        volume_gain_db=0.0
+    )
+
+    response = tts_client.synthesize_speech(
+        input=synthesis_input,
+        voice=voice,
+        audio_config=audio_config
+    )
+
+    # Upload to Cloud Storage with proper organization
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    filename = f"audio/{timestamp}-{uuid.uuid4()}.mp3"
+    blob = bucket.blob(filename)
+
+    # Set appropriate metadata
+    metadata = {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': str(len(response.audio_content)),
+        'x-goog-meta-timestamp': timestamp,
+        'Cache-Control': 'public, max-age=86400'
+    }
+
+    blob.metadata = metadata
+    blob.upload_from_string(response.audio_content, content_type='audio/mpeg')
+
+    # Attempt signed URL generation; do NOT make public unless explicitly allowed
+    try:
+        audio_url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(minutes=15),
+            method="GET"
+        )
+    except AttributeError:
+        # Signed URL generation unavailable (no private key in creds).
+        if os.getenv('ALLOW_PUBLIC_AUDIO', 'false').lower() == 'true':
+            blob.make_public()
+            audio_url = blob.public_url
+        else:
+            raise RuntimeError('signed_url_unavailable')
+
+    logging.info(f"TTS audio generated and uploaded: {filename}")
+    return {"audio_url": audio_url, "expires_in": "15m", "status": "success", "filename": filename}
+
+
+@safe_cloud_operation("text_to_speech")
+def _tts_sync(text: str):
+    """Decorated sync wrapper for TTS that applies retry/circuit logic."""
+    return _tts_impl(text)
 
 
 @app.route('/api/emergency-alert', methods=['POST'])
