@@ -8,7 +8,7 @@ This document summarizes key research papers related to emotion recognition, exp
 | ------------------------------------------------ | ------------------- | ------------------- | ------------------------------------------------------ | ------------------------------- | ------------------------------ |
 | GoEmotions (Demszky et al., 2020)                | GoEmotions          | BERT, BiLSTM        | BERT outperforms BiLSTM; grouping emotions improves F1 | Reddit-only data; English only  | Primary dataset and baseline   |
 | SHAP (Lundberg & Lee, 2017)                      | General             | Model-Agnostic      | Provides feature attribution explanations, Contribution of a feature or features to a particular change in the result             | Computationally expensive,  O(2^n) large datasets with size n    | Explainability analysis        |
-| DistilBERT (Sanh et al., 2019)                   | Multiple NLP tasks  | DistilBERT          | Smaller and faster than BERT with similar performance  | Slight accuracy reduction       | Efficiency comparison          |
+| DistilBERT (Sanh et al., 2019)                   | Multiple NLP tasks  | DistilBERT          | Smaller and faster than BERT with 97% similar performance  | Slight accuracy reduction       | Efficiency comparison          |
 | Attention Is All You Need (Vaswani et al., 2017) | Machine Translation | Transformer         | Introduced Transformer architecture                    | High computational cost         | Foundation of BERT             |
 | Fairlearn Documentation / Paper                  | Multiple            | Fairness Evaluation | Measures performance disparities across groups         | Depends on subgroup definitions | Linguistic robustness analysis |
 
