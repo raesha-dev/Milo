@@ -291,7 +291,7 @@ Large Teacher Model:
 
 BERT
 
-↓
+to
 
 Smaller Student Model:
 
