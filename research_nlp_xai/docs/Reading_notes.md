@@ -206,9 +206,9 @@ Sadness = 0.92
 
 SHAP Attribution:
 
-* isolated → +0.43
-* hopeless → +0.37
-* feel → +0.02
+* isolated => +0.43
+* hopeless => +0.37
+* feel => +0.02
 
 ---
 
